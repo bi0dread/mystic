@@ -4,11 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math"
 	"runtime"
 
-	"github.com/Graylog2/go-gelf/gelf"
 	"github.com/bi0dread/morgana"
 	"go.opentelemetry.io/otel/attribute"
 	semconv "go.opentelemetry.io/otel/semconv/v1.20.0"
@@ -26,7 +24,14 @@ type mysticZap struct {
 
 // ZapAdapter creates a zap-backed logger adapter
 func ZapAdapter(named string) Logger {
+	return ZapAdapterWithConfig(named, GraylogSenderConfig{
+		GrayLogAddr: GRAYLOG_ADDR,
+		Facility:    FACILITY,
+	})
+}
 
+// ZapAdapterWithConfig creates a zap-backed logger adapter with custom Graylog configuration
+func ZapAdapterWithConfig(named string, graylogConfig GraylogSenderConfig) Logger {
 	atomLevel := zap.NewAtomicLevelAt(zapcore.Level(LOG_LEVEL))
 
 	config := zap.NewDevelopmentConfig()
@@ -42,14 +47,13 @@ func ZapAdapter(named string) Logger {
 
 	telemetryCore := NewTelemetryCore(atomLevel, zapcore.NewConsoleEncoder(config.EncoderConfig))
 
-	gelfWriter, gelfWriterErr := gelf.NewWriter(GRAYLOG_ADDR)
-	if gelfWriterErr != nil {
-		log.Fatalf("Failed to create GELF writer: %v", gelfWriterErr)
-	}
-	gelfWriter.Facility = FACILITY
+	// Create Graylog sender for transport using provided configuration
+	graylogSender := NewGraylogSender(graylogConfig)
 
-	gelfCore := NewGelfCore(zapcore.AddSync(gelfWriter))
+	// Create GELF core for Graylog transport
+	gelfCore := NewGelfCore(zapcore.AddSync(graylogSender))
 
+	// Combine telemetry and Graylog transport
 	zapTee := zapcore.NewTee(telemetryCore, gelfCore)
 	logger = zap.New(zapTee)
 

@@ -38,6 +38,5 @@ func New(adapter Adapter, named string) Logger {
 
 func SetConfig(config Config) {
 	FACILITY = config.Facility
-	GRAYLOG_ADDR = config.GrayLogAddr
 	setLogLevel(config.LogLevel)
 }

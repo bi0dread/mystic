@@ -8,7 +8,6 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/Graylog2/go-gelf/gelf"
 	"github.com/bi0dread/morgana"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
@@ -26,6 +25,14 @@ type mysticZero struct {
 
 // ZerologAdapter creates a zerolog-backed adapter
 func ZerologAdapter(named string) Logger {
+	return ZerologAdapterWithConfig(named, GraylogSenderConfig{
+		GrayLogAddr: GRAYLOG_ADDR,
+		Facility:    FACILITY,
+	})
+}
+
+// ZerologAdapterWithConfig creates a zerolog-backed adapter with custom Graylog configuration
+func ZerologAdapterWithConfig(named string, graylogConfig GraylogSenderConfig) Logger {
 	// Configure zerolog time format similar to ISO8601 used in zap config
 	zerolog.TimeFieldFormat = time.RFC3339
 
@@ -44,18 +51,16 @@ func ZerologAdapter(named string) Logger {
 		zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	}
 
-	// Graylog writer
-	gelfWriter, _ := gelf.NewWriter(GRAYLOG_ADDR)
-	if gelfWriter != nil {
-		gelfWriter.Facility = FACILITY
-	}
-
 	// Console writer
 	console := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339}
 
+	// Create Graylog sender for transport using provided configuration
+	graylogSender := NewGraylogSender(graylogConfig)
+
+	// Combine console and Graylog outputs
 	var out io.Writer
-	if gelfWriter != nil {
-		out = io.MultiWriter(console, gelfWriter)
+	if graylogSender != nil {
+		out = io.MultiWriter(console, graylogSender)
 	} else {
 		out = console
 	}
