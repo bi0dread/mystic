@@ -2,6 +2,7 @@ package mystic
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -16,20 +17,30 @@ import (
 
 // FileAdapterConfig holds configuration for file logging
 type FileAdapterConfig struct {
-	Path       string        `json:"path"`        // Directory path for log files
-	Filename   string        `json:"filename"`    // Base filename (without extension)
-	MaxSize    int64         `json:"max_size"`    // Maximum file size in bytes
-	MaxAge     time.Duration `json:"max_age"`     // Maximum age of log files
-	MaxBackups int           `json:"max_backups"` // Maximum number of old log files to retain
-	Compress   bool          `json:"compress"`    // Whether to compress rotated files
-	Format     string        `json:"format"`      // Output format: "json", "console", "gelf"
-	Level      string        `json:"level"`       // Log level for file output
-	Facility   string        `json:"facility"`    // GELF facility name
+	SenderConfig               // Embed the common sender configuration
+	Path         string        `json:"path"`        // Directory path for log files
+	Filename     string        `json:"filename"`    // Base filename (without extension)
+	MaxSize      int64         `json:"max_size"`    // Maximum file size in bytes
+	MaxAge       time.Duration `json:"max_age"`     // Maximum age of log files
+	MaxBackups   int           `json:"max_backups"` // Maximum number of old log files to retain
+	Compress     bool          `json:"compress"`    // Whether to compress rotated files
+	Format       string        `json:"format"`      // Output format: "json", "console", "gelf"
+	Level        string        `json:"level"`       // Log level for file output
+	Facility     string        `json:"facility"`    // GELF facility name
 }
 
 // FileAdapter creates a file-backed logger adapter
 func FileAdapter(named string) Logger {
 	return FileAdapterWithConfig(named, FileAdapterConfig{
+		SenderConfig: SenderConfig{
+			Endpoint:   "./logs",
+			Timeout:    5000,
+			RetryCount: 3,
+			RetryDelay: 1000,
+			BatchSize:  100,
+			BatchDelay: 1000,
+			Format:     "json",
+		},
 		Path:       "./logs",
 		Filename:   "application",
 		MaxSize:    100 * 1024 * 1024,   // 100MB
@@ -319,4 +330,264 @@ func parseLogLevel(level string) zerolog.Level {
 	default:
 		return zerolog.InfoLevel
 	}
+}
+
+// FileSender implements LogSender interface for file transport
+type FileSender struct {
+	*BaseSender
+	config FileAdapterConfig
+	writer *RotatingFileWriter
+	mu     *sync.Mutex
+	// Configuration fields extracted from SenderConfig
+	endpoint    string
+	timeout     int
+	retryCount  int
+	retryDelay  int
+	batchSize   int
+	batchDelay  int
+	format      string
+	compression bool
+	tlsEnabled  bool
+	rateLimit   int
+}
+
+// NewFileSender creates a new file sender
+func NewFileSender(config FileAdapterConfig) (*FileSender, error) {
+	if err := ValidateSenderConfig(config.SenderConfig); err != nil {
+		return nil, fmt.Errorf("invalid sender config: %w", err)
+	}
+
+	// Ensure log directory exists
+	if err := os.MkdirAll(config.Path, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create log directory: %w", err)
+	}
+
+	// Create file writer with rotation
+	fileWriter := &RotatingFileWriter{
+		config: config,
+		mu:     &sync.Mutex{},
+	}
+
+	return &FileSender{
+		BaseSender: NewBaseSender(),
+		config:     config,
+		writer:     fileWriter,
+		mu:         &sync.Mutex{},
+		// Extract configuration from SenderConfig
+		endpoint:    config.Endpoint,
+		timeout:     config.Timeout,
+		retryCount:  config.RetryCount,
+		retryDelay:  config.RetryDelay,
+		batchSize:   config.BatchSize,
+		batchDelay:  config.BatchDelay,
+		format:      config.Format,
+		compression: config.Compression,
+		tlsEnabled:  config.TLSEnabled,
+		rateLimit:   config.RateLimit,
+	}, nil
+}
+
+// Send implements LogSender.Send
+func (f *FileSender) Send(entry LogEntry) error {
+	if !f.IsConnected() {
+		return ErrNotConnected
+	}
+
+	start := time.Now()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	// Convert LogEntry to appropriate format
+	var data []byte
+	var err error
+
+	switch f.config.Format {
+	case "json":
+		data, err = json.Marshal(entry)
+	case "gelf":
+		data, err = f.prepareGELF(entry)
+	default:
+		data, err = json.Marshal(entry)
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to marshal log entry: %w", err)
+	}
+
+	// Write to file
+	_, err = f.writer.Write(data)
+	if err != nil {
+		return fmt.Errorf("failed to write to file: %w", err)
+	}
+
+	// Update statistics
+	latency := float64(time.Since(start).Milliseconds())
+	f.UpdateStats(true, latency)
+
+	return nil
+}
+
+// SendBatch implements LogSender.SendBatch
+func (f *FileSender) SendBatch(entries []LogEntry) error {
+	if !f.IsConnected() {
+		return ErrNotConnected
+	}
+
+	start := time.Now()
+	var lastError error
+
+	for _, entry := range entries {
+		if err := f.Send(entry); err != nil {
+			lastError = err
+		}
+	}
+
+	// Update statistics for batch
+	latency := float64(time.Since(start).Milliseconds())
+	f.UpdateStats(lastError == nil, latency)
+
+	return lastError
+}
+
+// SendAsync implements LogSender.SendAsync
+func (f *FileSender) SendAsync(entry LogEntry) error {
+	go func() {
+		if err := f.Send(entry); err != nil {
+			fmt.Printf("Async file send failed: %v\n", err)
+		}
+	}()
+	return nil
+}
+
+// SendWithContext implements LogSender.SendWithContext
+func (f *FileSender) SendWithContext(ctx context.Context, entry LogEntry) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	return f.Send(entry)
+}
+
+// Close implements LogSender.Close
+func (f *FileSender) Close() error {
+	if f.writer != nil && f.writer.file != nil {
+		return f.writer.file.Close()
+	}
+	return f.BaseSender.Close()
+}
+
+// IsConnected implements LogSender.IsConnected
+func (f *FileSender) IsConnected() bool {
+	return f.BaseSender.IsConnected() && f.writer != nil
+}
+
+// GetStats implements LogSender.GetStats
+func (f *FileSender) GetStats() SenderStats {
+	return f.BaseSender.GetStats()
+}
+
+// Configuration methods implementation
+func (f *FileSender) GetEndpoint() string {
+	return f.endpoint
+}
+
+func (f *FileSender) GetTimeout() int {
+	return f.timeout
+}
+
+func (f *FileSender) GetRetryCount() int {
+	return f.retryCount
+}
+
+func (f *FileSender) GetRetryDelay() int {
+	return f.retryDelay
+}
+
+func (f *FileSender) GetBatchSize() int {
+	return f.batchSize
+}
+
+func (f *FileSender) GetBatchDelay() int {
+	return f.batchDelay
+}
+
+func (f *FileSender) GetFormat() string {
+	return f.format
+}
+
+func (f *FileSender) IsCompressionEnabled() bool {
+	return f.compression
+}
+
+func (f *FileSender) IsTLSEnabled() bool {
+	return f.tlsEnabled
+}
+
+func (f *FileSender) GetRateLimit() int {
+	return f.rateLimit
+}
+
+// prepareGELF converts LogEntry to GELF format
+func (f *FileSender) prepareGELF(entry LogEntry) ([]byte, error) {
+	gelfMessage := map[string]interface{}{
+		"short_message": entry.Message,
+		"level_string":  entry.Level,
+		"timestamp":     entry.Timestamp.Unix(),
+		"facility":      f.config.Facility,
+		"logger":        entry.Logger,
+	}
+
+	// Add custom fields
+	for k, v := range entry.Fields {
+		if k != "short_message" && k != "level_string" && k != "timestamp" && k != "facility" && k != "logger" {
+			gelfMessage[k] = v
+		}
+	}
+
+	return json.Marshal(gelfMessage)
+}
+
+// FileSenderFactory implements SenderFactory for file transport
+type FileSenderFactory struct{}
+
+// CreateSender creates a new file sender
+func (fsf *FileSenderFactory) CreateSender(config SenderConfig) (LogSender, error) {
+	fileConfig := FileAdapterConfig{
+		SenderConfig: config,
+		Path:         config.Endpoint,
+		Filename:     "application",
+		MaxSize:      100 * 1024 * 1024,   // 100MB
+		MaxAge:       30 * 24 * time.Hour, // 30 days
+		MaxBackups:   5,
+		Compress:     config.Compression,
+		Format:       config.Format,
+		Level:        "info",
+		Facility:     "mystic",
+	}
+
+	return NewFileSender(fileConfig)
+}
+
+// GetSupportedFormats returns the formats this factory supports
+func (fsf *FileSenderFactory) GetSupportedFormats() []string {
+	return []string{"json", "console", "gelf"}
+}
+
+// ValidateConfig validates the configuration for file sender
+func (fsf *FileSenderFactory) ValidateConfig(config SenderConfig) error {
+	if err := ValidateSenderConfig(config); err != nil {
+		return err
+	}
+
+	// Validate file-specific requirements
+	if config.Endpoint == "" {
+		return fmt.Errorf("file path cannot be empty")
+	}
+
+	if config.Format != "" && config.Format != "json" && config.Format != "console" && config.Format != "gelf" {
+		return fmt.Errorf("unsupported format for file: %s", config.Format)
+	}
+
+	return nil
 }

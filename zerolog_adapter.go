@@ -25,14 +25,16 @@ type mysticZero struct {
 
 // ZerologAdapter creates a zerolog-backed adapter
 func ZerologAdapter(named string) Logger {
-	return ZerologAdapterWithConfig(named, GraylogSenderConfig{
-		GrayLogAddr: GRAYLOG_ADDR,
-		Facility:    FACILITY,
-	})
+	return ZerologAdapterWithConfig(named, nil)
 }
 
-// ZerologAdapterWithConfig creates a zerolog-backed adapter with custom Graylog configuration
-func ZerologAdapterWithConfig(named string, graylogConfig GraylogSenderConfig) Logger {
+// ZerologAdapterWithSender creates a zerolog-backed adapter with optional sender
+func ZerologAdapterWithSender(named string, sender LogSender) Logger {
+	return ZerologAdapterWithConfig(named, sender)
+}
+
+// ZerologAdapterWithConfig creates a zerolog-backed adapter with optional sender
+func ZerologAdapterWithConfig(named string, sender LogSender) Logger {
 	// Configure zerolog time format similar to ISO8601 used in zap config
 	zerolog.TimeFieldFormat = time.RFC3339
 
@@ -54,14 +56,14 @@ func ZerologAdapterWithConfig(named string, graylogConfig GraylogSenderConfig) L
 	// Console writer
 	console := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339}
 
-	// Create Graylog sender for transport using provided configuration
-	graylogSender := NewGraylogSender(graylogConfig)
-
-	// Combine console and Graylog outputs
+	// Combine console and optional sender outputs
 	var out io.Writer
-	if graylogSender != nil {
-		out = io.MultiWriter(console, graylogSender)
+	if sender != nil {
+		// Use provided sender
+		senderWriter := &LogSenderWriter{sender: sender}
+		out = io.MultiWriter(console, senderWriter)
 	} else {
+		// Console only
 		out = console
 	}
 

@@ -15,7 +15,7 @@ type Config struct {
 type ConfigProfile struct {
 	Name          string
 	Config        Config
-	GraylogConfig GraylogSenderConfig
+	GraylogConfig SenderConfig
 }
 
 // LoadConfigFromEnv loads configuration from environment variables
@@ -38,20 +38,22 @@ func LoadConfigFromEnv() (*Config, error) {
 }
 
 // LoadGraylogConfigFromEnv loads Graylog configuration from environment variables
-func LoadGraylogConfigFromEnv() (*GraylogSenderConfig, error) {
-	config := &GraylogSenderConfig{}
+func LoadGraylogConfigFromEnv() (*SenderConfig, error) {
+	config := &SenderConfig{}
 
 	if graylogAddr := os.Getenv("GRAYLOG_ADDR"); graylogAddr != "" {
-		config.GrayLogAddr = graylogAddr
+		config.Endpoint = graylogAddr
 	} else {
-		config.GrayLogAddr = "0.0.0.0:12201" // default
+		config.Endpoint = "0.0.0.0:12201" // default
 	}
 
-	if facility := os.Getenv("FACILITY"); facility != "" {
-		config.Facility = facility
-	} else {
-		return nil, fmt.Errorf("FACILITY environment variable is required")
-	}
+	// Set other defaults
+	config.Timeout = 5000
+	config.RetryCount = 3
+	config.RetryDelay = 1000
+	config.BatchSize = 100
+	config.BatchDelay = 1000
+	config.Format = "gelf"
 
 	return config, nil
 }
@@ -81,27 +83,10 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// Validate validates the Graylog configuration
-func (c *GraylogSenderConfig) Validate() error {
-	if c.Facility == "" {
-		return fmt.Errorf("Facility is required")
-	}
-
-	// GrayLogAddr can be empty (will use fallback)
-	return nil
-}
-
 // SetDefaults sets default values for the configuration
 func (c *Config) SetDefaults() {
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
-	}
-}
-
-// SetDefaults sets default values for the Graylog configuration
-func (c *GraylogSenderConfig) SetDefaults() {
-	if c.GrayLogAddr == "" {
-		c.GrayLogAddr = "0.0.0.0:12201"
 	}
 }
 
@@ -115,9 +100,14 @@ func LoadProfile(profile string) (*ConfigProfile, error) {
 				LogLevel: "debug",
 				Facility: "mystic-dev",
 			},
-			GraylogConfig: GraylogSenderConfig{
-				GrayLogAddr: "localhost:12201",
-				Facility:    "mystic-dev",
+			GraylogConfig: SenderConfig{
+				Endpoint:   "localhost:12201",
+				Timeout:    5000,
+				RetryCount: 3,
+				RetryDelay: 1000,
+				BatchSize:  100,
+				BatchDelay: 1000,
+				Format:     "gelf",
 			},
 		}, nil
 	case "staging":
@@ -127,9 +117,14 @@ func LoadProfile(profile string) (*ConfigProfile, error) {
 				LogLevel: "info",
 				Facility: "mystic-staging",
 			},
-			GraylogConfig: GraylogSenderConfig{
-				GrayLogAddr: "staging-graylog:12201",
-				Facility:    "mystic-staging",
+			GraylogConfig: SenderConfig{
+				Endpoint:   "staging-graylog:12201",
+				Timeout:    5000,
+				RetryCount: 3,
+				RetryDelay: 1000,
+				BatchSize:  100,
+				BatchDelay: 1000,
+				Format:     "gelf",
 			},
 		}, nil
 	case "production":
@@ -139,9 +134,14 @@ func LoadProfile(profile string) (*ConfigProfile, error) {
 				LogLevel: "warn",
 				Facility: "mystic-prod",
 			},
-			GraylogConfig: GraylogSenderConfig{
-				GrayLogAddr: "prod-graylog:12201",
-				Facility:    "mystic-prod",
+			GraylogConfig: SenderConfig{
+				Endpoint:   "prod-graylog:12201",
+				Timeout:    5000,
+				RetryCount: 3,
+				RetryDelay: 1000,
+				BatchSize:  100,
+				BatchDelay: 1000,
+				Format:     "gelf",
 			},
 		}, nil
 	case "testing":
@@ -151,9 +151,14 @@ func LoadProfile(profile string) (*ConfigProfile, error) {
 				LogLevel: "debug",
 				Facility: "mystic-test",
 			},
-			GraylogConfig: GraylogSenderConfig{
-				GrayLogAddr: "",
-				Facility:    "mystic-test",
+			GraylogConfig: SenderConfig{
+				Endpoint:   "",
+				Timeout:    5000,
+				RetryCount: 3,
+				RetryDelay: 1000,
+				BatchSize:  100,
+				BatchDelay: 1000,
+				Format:     "gelf",
 			},
 		}, nil
 	default:

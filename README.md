@@ -312,7 +312,7 @@ enhanced.Sampled("debug", 0.1, "high-volume-debug", "key", "value")
 enhanced.Sampled("info", 0.5, "sampled-info", "metric", "value")
 ```
 
-### Metrics Collection
+### Prometheus Metrics Collection
 
 ```go
 // Enable metrics collection
@@ -327,7 +327,27 @@ enhanced.RecordGauge("active_connections", 42.5)
 
 // Record histograms
 enhanced.RecordHistogram("request_duration_ms", 150.2)
+
+// Start Prometheus metrics server
+go func() {
+    if err := mystic.StartPrometheusMetricsServer(":8080"); err != nil {
+        log.Printf("Failed to start metrics server: %v", err)
+    }
+}()
+
+// Access metrics at: http://localhost:8080/metrics
 ```
+
+**Available Metrics:**
+- **Counters**: `{name}_total` - Incrementing counters for events
+- **Gauges**: `{name}_current` - Current values that can go up and down
+- **Histograms**: `{name}_duration` - Distribution of values with configurable buckets
+
+**Prometheus Integration:**
+- Metrics are automatically registered with Prometheus
+- Standard Prometheus naming conventions
+- Built-in HTTP endpoint for scraping
+- Compatible with Grafana dashboards
 
 ### Performance Tracking
 

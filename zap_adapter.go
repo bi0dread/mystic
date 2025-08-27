@@ -24,14 +24,16 @@ type mysticZap struct {
 
 // ZapAdapter creates a zap-backed logger adapter
 func ZapAdapter(named string) Logger {
-	return ZapAdapterWithConfig(named, GraylogSenderConfig{
-		GrayLogAddr: GRAYLOG_ADDR,
-		Facility:    FACILITY,
-	})
+	return ZapAdapterWithConfig(named, nil)
 }
 
-// ZapAdapterWithConfig creates a zap-backed logger adapter with custom Graylog configuration
-func ZapAdapterWithConfig(named string, graylogConfig GraylogSenderConfig) Logger {
+// ZapAdapterWithSender creates a zap-backed logger adapter with optional sender
+func ZapAdapterWithSender(named string, sender LogSender) Logger {
+	return ZapAdapterWithConfig(named, sender)
+}
+
+// ZapAdapterWithConfig creates a zap-backed logger adapter with optional sender
+func ZapAdapterWithConfig(named string, sender LogSender) Logger {
 	atomLevel := zap.NewAtomicLevelAt(zapcore.Level(LOG_LEVEL))
 
 	config := zap.NewDevelopmentConfig()
@@ -47,14 +49,24 @@ func ZapAdapterWithConfig(named string, graylogConfig GraylogSenderConfig) Logge
 
 	telemetryCore := NewTelemetryCore(atomLevel, zapcore.NewConsoleEncoder(config.EncoderConfig))
 
-	// Create Graylog sender for transport using provided configuration
-	graylogSender := NewGraylogSender(graylogConfig)
+	var cores []zapcore.Core
+	cores = append(cores, telemetryCore)
 
-	// Create GELF core for Graylog transport
-	gelfCore := NewGelfCore(zapcore.AddSync(graylogSender))
+	// Add GELF core only if sender is provided
+	if sender != nil {
+		// Create GELF core for sender transport using a writer adapter
+		senderWriter := &LogSenderWriter{sender: sender}
+		gelfCore := NewGelfCore(zapcore.AddSync(senderWriter))
+		cores = append(cores, gelfCore)
+	}
 
-	// Combine telemetry and Graylog transport
-	zapTee := zapcore.NewTee(telemetryCore, gelfCore)
+	// Combine cores
+	var zapTee zapcore.Core
+	if len(cores) == 1 {
+		zapTee = cores[0]
+	} else {
+		zapTee = zapcore.NewTee(cores...)
+	}
 	logger = zap.New(zapTee)
 
 	logger = logger.WithOptions(zap.AddCallerSkip(1))

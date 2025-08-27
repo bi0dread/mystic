@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 )
 
 // MultiOutputConfig holds configuration for multi-output logging
 type MultiOutputConfig struct {
-	Adapters []AdapterConfig `json:"adapters"` // List of adapter configurations
-	Strategy string          `json:"strategy"` // Output strategy: "all", "first_success", "round_robin"
+	SenderConfig                 // Embed the common sender configuration
+	Adapters     []AdapterConfig `json:"adapters"` // List of adapter configurations
+	Strategy     string          `json:"strategy"` // Output strategy: "all", "first_success", "round_robin"
 }
 
 // AdapterConfig represents a single adapter configuration
@@ -292,4 +294,258 @@ func (w *MultiOutputWriter) RemoveWriter(writer io.Writer) {
 			break
 		}
 	}
+}
+
+// MultiOutputSender implements LogSender interface for multi-output transport
+type MultiOutputSender struct {
+	*BaseSender
+	config   MultiOutputConfig
+	senders  []LogSender
+	strategy string
+	mu       sync.Mutex
+	// Configuration fields extracted from SenderConfig
+	endpoint    string
+	timeout     int
+	retryCount  int
+	retryDelay  int
+	batchSize   int
+	batchDelay  int
+	format      string
+	compression bool
+	tlsEnabled  bool
+	rateLimit   int
+}
+
+// NewMultiOutputSender creates a new multi-output sender
+func NewMultiOutputSender(config MultiOutputConfig, senders []LogSender) (*MultiOutputSender, error) {
+	if err := ValidateSenderConfig(config.SenderConfig); err != nil {
+		return nil, fmt.Errorf("invalid sender config: %w", err)
+	}
+
+	if len(senders) == 0 {
+		return nil, fmt.Errorf("at least one sender is required")
+	}
+
+	return &MultiOutputSender{
+		BaseSender: NewBaseSender(),
+		config:     config,
+		senders:    senders,
+		strategy:   config.Strategy,
+		mu:         sync.Mutex{},
+		// Extract configuration from SenderConfig
+		endpoint:    config.Endpoint,
+		timeout:     config.Timeout,
+		retryCount:  config.RetryCount,
+		retryDelay:  config.RetryDelay,
+		batchSize:   config.BatchSize,
+		batchDelay:  config.BatchDelay,
+		format:      config.Format,
+		compression: config.Compression,
+		tlsEnabled:  config.TLSEnabled,
+		rateLimit:   config.RateLimit,
+	}, nil
+}
+
+// Send implements LogSender.Send
+func (m *MultiOutputSender) Send(entry LogEntry) error {
+	if !m.IsConnected() {
+		return ErrNotConnected
+	}
+
+	start := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var lastError error
+
+	switch m.strategy {
+	case "all":
+		// Send to all senders
+		for _, sender := range m.senders {
+			if err := sender.Send(entry); err != nil {
+				lastError = err
+			}
+		}
+	case "first_success":
+		// Send to first successful sender
+		for _, sender := range m.senders {
+			if err := sender.Send(entry); err == nil {
+				// Success, update stats and return
+				latency := float64(time.Since(start).Milliseconds())
+				m.UpdateStats(true, latency)
+				return nil
+			} else {
+				lastError = err
+			}
+		}
+	case "round_robin":
+		// Send to next sender in round-robin fashion
+		static.counter++
+		index := static.counter % len(m.senders)
+		sender := m.senders[index]
+		lastError = sender.Send(entry)
+	default:
+		// Default to "all" strategy
+		for _, sender := range m.senders {
+			if err := sender.Send(entry); err != nil {
+				lastError = err
+			}
+		}
+	}
+
+	// Update statistics
+	latency := float64(time.Since(start).Milliseconds())
+	m.UpdateStats(lastError == nil, latency)
+
+	return lastError
+}
+
+// SendBatch implements LogSender.SendBatch
+func (m *MultiOutputSender) SendBatch(entries []LogEntry) error {
+	if !m.IsConnected() {
+		return ErrNotConnected
+	}
+
+	start := time.Now()
+	var lastError error
+
+	for _, entry := range entries {
+		if err := m.Send(entry); err != nil {
+			lastError = err
+		}
+	}
+
+	// Update statistics for batch
+	latency := float64(time.Since(start).Milliseconds())
+	m.UpdateStats(lastError == nil, latency)
+
+	return lastError
+}
+
+// SendAsync implements LogSender.SendAsync
+func (m *MultiOutputSender) SendAsync(entry LogEntry) error {
+	go func() {
+		if err := m.Send(entry); err != nil {
+			fmt.Printf("Async multi-output send failed: %v\n", err)
+		}
+	}()
+	return nil
+}
+
+// SendWithContext implements LogSender.SendWithContext
+func (m *MultiOutputSender) SendWithContext(ctx context.Context, entry LogEntry) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	return m.Send(entry)
+}
+
+// Close implements LogSender.Close
+func (m *MultiOutputSender) Close() error {
+	var lastError error
+
+	for _, sender := range m.senders {
+		if err := sender.Close(); err != nil {
+			lastError = err
+		}
+	}
+
+	return lastError
+}
+
+// IsConnected implements LogSender.IsConnected
+func (m *MultiOutputSender) IsConnected() bool {
+	// Check if any sender is connected
+	for _, sender := range m.senders {
+		if sender.IsConnected() {
+			return true
+		}
+	}
+	return false
+}
+
+// GetStats implements LogSender.GetStats
+func (m *MultiOutputSender) GetStats() SenderStats {
+	var combined SenderStats
+
+	for _, sender := range m.senders {
+		stats := sender.GetStats()
+		combined.TotalSent += stats.TotalSent
+		combined.TotalFailed += stats.TotalFailed
+		combined.AverageLatency += stats.AverageLatency
+	}
+
+	if len(m.senders) > 0 {
+		combined.AverageLatency /= float64(len(m.senders))
+	}
+
+	total := combined.TotalSent + combined.TotalFailed
+	if total > 0 {
+		combined.SuccessRate = float64(combined.TotalSent) / float64(total)
+	}
+
+	return combined
+}
+
+// Configuration methods implementation
+func (m *MultiOutputSender) GetEndpoint() string {
+	return m.endpoint
+}
+
+func (m *MultiOutputSender) GetTimeout() int {
+	return m.timeout
+}
+
+func (m *MultiOutputSender) GetRetryCount() int {
+	return m.retryCount
+}
+
+func (m *MultiOutputSender) GetRetryDelay() int {
+	return m.retryDelay
+}
+
+func (m *MultiOutputSender) GetBatchSize() int {
+	return m.batchSize
+}
+
+func (m *MultiOutputSender) GetBatchDelay() int {
+	return m.batchDelay
+}
+
+func (m *MultiOutputSender) GetFormat() string {
+	return m.format
+}
+
+func (m *MultiOutputSender) IsCompressionEnabled() bool {
+	return m.compression
+}
+
+func (m *MultiOutputSender) IsTLSEnabled() bool {
+	return m.tlsEnabled
+}
+
+func (m *MultiOutputSender) GetRateLimit() int {
+	return m.rateLimit
+}
+
+// MultiOutputSenderFactory implements SenderFactory for multi-output transport
+type MultiOutputSenderFactory struct{}
+
+// CreateSender creates a new multi-output sender
+func (mosf *MultiOutputSenderFactory) CreateSender(config SenderConfig) (LogSender, error) {
+	// This factory requires additional configuration to create senders
+	// For now, return an error indicating that manual configuration is needed
+	return nil, fmt.Errorf("multi-output sender requires manual configuration of underlying senders")
+}
+
+// GetSupportedFormats returns the formats this factory supports
+func (mosf *MultiOutputSenderFactory) GetSupportedFormats() []string {
+	return []string{"json", "gelf", "console"}
+}
+
+// ValidateConfig validates the configuration for multi-output sender
+func (mosf *MultiOutputSenderFactory) ValidateConfig(config SenderConfig) error {
+	return ValidateSenderConfig(config)
 }

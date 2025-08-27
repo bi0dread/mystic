@@ -16,23 +16,31 @@ import (
 
 // HTTPAdapterConfig holds configuration for HTTP logging
 type HTTPAdapterConfig struct {
-	Endpoint   string            `json:"endpoint"`    // HTTP endpoint URL
-	Method     string            `json:"method"`      // HTTP method (POST, PUT, etc.)
-	Headers    map[string]string `json:"headers"`     // Custom headers
-	Timeout    time.Duration     `json:"timeout"`     // Request timeout
-	RetryCount int               `json:"retry_count"` // Number of retries on failure
-	RetryDelay time.Duration     `json:"retry_delay"` // Delay between retries
-	BatchSize  int               `json:"batch_size"`  // Batch size for log entries
-	BatchDelay time.Duration     `json:"batch_delay"` // Delay before sending batch
-	Format     string            `json:"format"`      // Output format: "json", "gelf"
-	Level      string            `json:"level"`       // Log level for HTTP output
-	Facility   string            `json:"facility"`    // GELF facility name
+	SenderConfig                   // Embed the common sender configuration
+	Method       string            `json:"method"`      // HTTP method (POST, PUT, etc.)
+	Headers      map[string]string `json:"headers"`     // Custom headers
+	Timeout      time.Duration     `json:"timeout"`     // Request timeout
+	RetryCount   int               `json:"retry_count"` // Number of retries on failure
+	RetryDelay   time.Duration     `json:"retry_delay"` // Delay between retries
+	BatchSize    int               `json:"batch_size"`  // Batch size for log entries
+	BatchDelay   time.Duration     `json:"batch_delay"` // Delay before sending batch
+	Format       string            `json:"format"`      // Output format: "json", "gelf"
+	Level        string            `json:"level"`       // Log level for HTTP output
+	Facility     string            `json:"facility"`    // GELF facility name
 }
 
 // HTTPAdapter creates an HTTP-backed logger adapter
 func HTTPAdapter(named string) Logger {
 	return HTTPAdapterWithConfig(named, HTTPAdapterConfig{
-		Endpoint:   "http://localhost:8080/logs",
+		SenderConfig: SenderConfig{
+			Endpoint:   "http://localhost:8080/logs",
+			Timeout:    5000,
+			RetryCount: 3,
+			RetryDelay: 1000,
+			BatchSize:  100,
+			BatchDelay: 1000,
+			Format:     "json",
+		},
 		Method:     "POST",
 		Headers:    map[string]string{"Content-Type": "application/json"},
 		Timeout:    5 * time.Second,
@@ -99,6 +107,300 @@ type LogEntry struct {
 	Timestamp time.Time              `json:"timestamp"`
 	Fields    map[string]interface{} `json:"fields"`
 	Logger    string                 `json:"logger"`
+}
+
+// HTTPSender implements LogSender interface for HTTP transport
+type HTTPSender struct {
+	*BaseSender
+	config         HTTPAdapterConfig
+	client         *http.Client
+	batchProcessor *HTTPBatchProcessor
+	// Configuration fields extracted from SenderConfig
+	endpoint    string
+	timeout     int
+	retryCount  int
+	retryDelay  int
+	batchSize   int
+	batchDelay  int
+	format      string
+	compression bool
+	tlsEnabled  bool
+	rateLimit   int
+}
+
+// NewHTTPSender creates a new HTTP sender
+func NewHTTPSender(config HTTPAdapterConfig) (*HTTPSender, error) {
+	if err := ValidateSenderConfig(config.SenderConfig); err != nil {
+		return nil, fmt.Errorf("invalid sender config: %w", err)
+	}
+
+	// Create HTTP client
+	client := &http.Client{
+		Timeout: config.Timeout,
+	}
+
+	// Create batch processor
+	batchProcessor := &HTTPBatchProcessor{
+		config: config,
+		client: client,
+		queue:  make(chan LogEntry, config.BatchSize*2),
+		mu:     &sync.Mutex{},
+	}
+
+	// Start batch processor
+	go batchProcessor.Start()
+
+	return &HTTPSender{
+		BaseSender:     NewBaseSender(),
+		config:         config,
+		client:         client,
+		batchProcessor: batchProcessor,
+		// Extract configuration from SenderConfig
+		endpoint:    config.Endpoint,
+		timeout:     int(config.Timeout.Milliseconds()),
+		retryCount:  config.RetryCount,
+		retryDelay:  int(config.RetryDelay.Milliseconds()),
+		batchSize:   config.BatchSize,
+		batchDelay:  int(config.BatchDelay.Milliseconds()),
+		format:      config.Format,
+		compression: config.Compression,
+		tlsEnabled:  config.TLSEnabled,
+		rateLimit:   config.RateLimit,
+	}, nil
+}
+
+// Send implements LogSender.Send
+func (h *HTTPSender) Send(entry LogEntry) error {
+	if !h.IsConnected() {
+		return ErrNotConnected
+	}
+
+	start := time.Now()
+
+	// Send the entry through the batch processor
+	select {
+	case h.batchProcessor.queue <- entry:
+		// Successfully queued
+		latency := float64(time.Since(start).Milliseconds())
+		h.UpdateStats(true, latency)
+		return nil
+	default:
+		// Queue is full, send directly
+		return h.sendDirect(entry, start)
+	}
+}
+
+// SendBatch implements LogSender.SendBatch
+func (h *HTTPSender) SendBatch(entries []LogEntry) error {
+	if !h.IsConnected() {
+		return ErrNotConnected
+	}
+
+	start := time.Now()
+	var lastError error
+
+	for _, entry := range entries {
+		if err := h.Send(entry); err != nil {
+			lastError = err
+		}
+	}
+
+	// Update statistics for batch
+	latency := float64(time.Since(start).Milliseconds())
+	h.UpdateStats(lastError == nil, latency)
+
+	return lastError
+}
+
+// SendAsync implements LogSender.SendAsync
+func (h *HTTPSender) SendAsync(entry LogEntry) error {
+	go func() {
+		if err := h.Send(entry); err != nil {
+			fmt.Printf("Async HTTP send failed: %v\n", err)
+		}
+	}()
+	return nil
+}
+
+// SendWithContext implements LogSender.SendWithContext
+func (h *HTTPSender) SendWithContext(ctx context.Context, entry LogEntry) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	return h.Send(entry)
+}
+
+// Close implements LogSender.Close
+func (h *HTTPSender) Close() error {
+	if h.batchProcessor != nil {
+		close(h.batchProcessor.queue)
+	}
+	return h.BaseSender.Close()
+}
+
+// IsConnected implements LogSender.IsConnected
+func (h *HTTPSender) IsConnected() bool {
+	return h.BaseSender.IsConnected() && h.batchProcessor != nil
+}
+
+// GetStats implements LogSender.GetStats
+func (h *HTTPSender) GetStats() SenderStats {
+	return h.BaseSender.GetStats()
+}
+
+// Configuration methods implementation
+func (h *HTTPSender) GetEndpoint() string {
+	return h.endpoint
+}
+
+func (h *HTTPSender) GetTimeout() int {
+	return h.timeout
+}
+
+func (h *HTTPSender) GetRetryCount() int {
+	return h.retryCount
+}
+
+func (h *HTTPSender) GetRetryDelay() int {
+	return h.retryDelay
+}
+
+func (h *HTTPSender) GetBatchSize() int {
+	return h.batchSize
+}
+
+func (h *HTTPSender) GetBatchDelay() int {
+	return h.batchDelay
+}
+
+func (h *HTTPSender) GetFormat() string {
+	return h.format
+}
+
+func (h *HTTPSender) IsCompressionEnabled() bool {
+	return h.compression
+}
+
+func (h *HTTPSender) IsTLSEnabled() bool {
+	return h.tlsEnabled
+}
+
+func (h *HTTPSender) GetRateLimit() int {
+	return h.rateLimit
+}
+
+// sendDirect sends an entry directly without batching
+func (h *HTTPSender) sendDirect(entry LogEntry, start time.Time) error {
+	// Prepare request body
+	var body []byte
+	var err error
+
+	switch h.config.Format {
+	case "gelf":
+		body, err = h.prepareGELF(entry)
+	default:
+		body, err = json.Marshal(entry)
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to marshal log entry: %w", err)
+	}
+
+	// Create request
+	req, err := http.NewRequest(h.config.Method, h.config.Endpoint, bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Set headers
+	req.Header.Set("Content-Type", "application/json")
+	for key, value := range h.config.Headers {
+		req.Header.Set(key, value)
+	}
+
+	// Send with retries
+	var lastError error
+	for attempt := 0; attempt <= h.config.RetryCount; attempt++ {
+		resp, err := h.client.Do(req)
+		if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			resp.Body.Close()
+			return nil
+		}
+
+		if resp != nil {
+			resp.Body.Close()
+		}
+
+		lastError = err
+		if attempt < h.config.RetryCount {
+			time.Sleep(h.config.RetryDelay)
+		}
+	}
+
+	return fmt.Errorf("failed to send after %d attempts: %w", h.config.RetryCount+1, lastError)
+}
+
+// prepareGELF converts LogEntry to GELF format
+func (h *HTTPSender) prepareGELF(entry LogEntry) ([]byte, error) {
+	gelfMessage := map[string]interface{}{
+		"short_message": entry.Message,
+		"level_string":  entry.Level,
+		"timestamp":     entry.Timestamp.Unix(),
+		"facility":      h.config.Facility,
+		"logger":        entry.Logger,
+	}
+
+	// Add custom fields
+	for k, v := range entry.Fields {
+		if k != "short_message" && k != "level_string" && k != "timestamp" && k != "facility" && k != "logger" {
+			gelfMessage[k] = v
+		}
+	}
+
+	return json.Marshal(gelfMessage)
+}
+
+// HTTPSenderFactory implements SenderFactory for HTTP transport
+type HTTPSenderFactory struct{}
+
+// CreateSender creates a new HTTP sender
+func (hsf *HTTPSenderFactory) CreateSender(config SenderConfig) (LogSender, error) {
+	httpConfig := HTTPAdapterConfig{
+		SenderConfig: config,
+		Method:       "POST",
+		Headers:      map[string]string{"Content-Type": "application/json"},
+		Timeout:      time.Duration(config.Timeout) * time.Millisecond,
+		RetryCount:   config.RetryCount,
+		RetryDelay:   time.Duration(config.RetryDelay) * time.Millisecond,
+		BatchSize:    config.BatchSize,
+		BatchDelay:   time.Duration(config.BatchDelay) * time.Millisecond,
+		Format:       config.Format,
+		Level:        "info",
+		Facility:     "mystic",
+	}
+
+	return NewHTTPSender(httpConfig)
+}
+
+// GetSupportedFormats returns the formats this factory supports
+func (hsf *HTTPSenderFactory) GetSupportedFormats() []string {
+	return []string{"json", "gelf"}
+}
+
+// ValidateConfig validates the configuration for HTTP sender
+func (hsf *HTTPSenderFactory) ValidateConfig(config SenderConfig) error {
+	if err := ValidateSenderConfig(config); err != nil {
+		return err
+	}
+
+	// Validate HTTP-specific requirements
+	if config.Format != "" && config.Format != "json" && config.Format != "gelf" {
+		return fmt.Errorf("unsupported format for HTTP: %s", config.Format)
+	}
+
+	return nil
 }
 
 // HTTPBatchProcessor handles batching and sending log entries

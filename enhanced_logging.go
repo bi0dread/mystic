@@ -3,9 +3,12 @@ package mystic
 import (
 	"context"
 	"math/rand"
+	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // EnhancedLogger extends the basic Logger with advanced features
@@ -56,14 +59,9 @@ type EnhancedLoggerConfig struct {
 // NewEnhancedLogger creates an enhanced logger from a base logger
 func NewEnhancedLogger(base Logger, config EnhancedLoggerConfig) EnhancedLogger {
 	return &mysticEnhanced{
-		base:   base,
-		config: config,
-		metrics: &MetricsCollector{
-			counters:   make(map[string]*int64),
-			gauges:     make(map[string]*float64),
-			histograms: make(map[string][]float64),
-			mu:         &sync.RWMutex{},
-		},
+		base:    base,
+		config:  config,
+		metrics: NewPrometheusMetricsCollector(),
 		rateLimiter: &RateLimiter{
 			limit: 1000,
 			count: 0,
@@ -76,7 +74,7 @@ func NewEnhancedLogger(base Logger, config EnhancedLoggerConfig) EnhancedLogger 
 type mysticEnhanced struct {
 	base        Logger
 	config      EnhancedLoggerConfig
-	metrics     *MetricsCollector
+	metrics     *PrometheusMetricsCollector
 	rateLimiter *RateLimiter
 	devMode     bool
 	prettyPrint bool
@@ -299,75 +297,120 @@ func (m *mysticEnhanced) logAtLevel(level, msg string, keysAndValues ...interfac
 	}
 }
 
-// MetricsCollector collects and manages metrics
-type MetricsCollector struct {
-	counters   map[string]*int64
-	gauges     map[string]*float64
-	histograms map[string][]float64
+// PrometheusMetricsCollector collects and manages Prometheus metrics
+type PrometheusMetricsCollector struct {
+	counters   map[string]prometheus.Counter
+	gauges     map[string]prometheus.Gauge
+	histograms map[string]prometheus.Histogram
 	mu         *sync.RWMutex
+	registry   prometheus.Registerer
 }
 
-func (mc *MetricsCollector) IncrementCounter(name string, value int64) {
-	mc.mu.Lock()
-	defer mc.mu.Unlock()
-
-	if counter, exists := mc.counters[name]; exists {
-		atomic.AddInt64(counter, value)
-	} else {
-		var newCounter int64 = value
-		mc.counters[name] = &newCounter
+// NewPrometheusMetricsCollector creates a new Prometheus metrics collector
+func NewPrometheusMetricsCollector() *PrometheusMetricsCollector {
+	return &PrometheusMetricsCollector{
+		counters:   make(map[string]prometheus.Counter),
+		gauges:     make(map[string]prometheus.Gauge),
+		histograms: make(map[string]prometheus.Histogram),
+		mu:         &sync.RWMutex{},
+		registry:   prometheus.DefaultRegisterer,
 	}
 }
 
-func (mc *MetricsCollector) RecordGauge(name string, value float64) {
-	mc.mu.Lock()
-	defer mc.mu.Unlock()
-
-	if gauge, exists := mc.gauges[name]; exists {
-		*gauge = value
-	} else {
-		var newGauge float64 = value
-		mc.gauges[name] = &newGauge
+// NewPrometheusMetricsCollectorWithRegistry creates a new Prometheus metrics collector with custom registry
+func NewPrometheusMetricsCollectorWithRegistry(registry prometheus.Registerer) *PrometheusMetricsCollector {
+	return &PrometheusMetricsCollector{
+		counters:   make(map[string]prometheus.Counter),
+		gauges:     make(map[string]prometheus.Gauge),
+		histograms: make(map[string]prometheus.Histogram),
+		mu:         &sync.RWMutex{},
+		registry:   registry,
 	}
 }
 
-func (mc *MetricsCollector) RecordHistogram(name string, value float64) {
-	mc.mu.Lock()
-	defer mc.mu.Unlock()
-
-	if histogram, exists := mc.histograms[name]; exists {
-		mc.histograms[name] = append(histogram, value)
-	} else {
-		mc.histograms[name] = []float64{value}
-	}
-}
-
-// GetMetrics returns a copy of all metrics
-func (mc *MetricsCollector) GetMetrics() map[string]interface{} {
+func (mc *PrometheusMetricsCollector) IncrementCounter(name string, value int64) {
 	mc.mu.RLock()
-	defer mc.mu.RUnlock()
+	counter, exists := mc.counters[name]
+	mc.mu.RUnlock()
 
-	metrics := make(map[string]interface{})
-
-	// Copy counters
-	for name, counter := range mc.counters {
-		metrics[name+"_counter"] = atomic.LoadInt64(counter)
-	}
-
-	// Copy gauges
-	for name, gauge := range mc.gauges {
-		metrics[name+"_gauge"] = *gauge
-	}
-
-	// Copy histograms (compute statistics)
-	for name, histogram := range mc.histograms {
-		if len(histogram) > 0 {
-			stats := computeHistogramStats(histogram)
-			metrics[name+"_histogram"] = stats
+	if !exists {
+		mc.mu.Lock()
+		defer mc.mu.Unlock()
+		// Double-check after acquiring write lock
+		if counter, exists = mc.counters[name]; !exists {
+			counter = prometheus.NewCounter(prometheus.CounterOpts{
+				Name: name + "_total",
+				Help: "Counter for " + name,
+			})
+			if err := mc.registry.Register(counter); err != nil {
+				// If registration fails, create a no-op counter
+				counter = prometheus.NewCounter(prometheus.CounterOpts{})
+			}
+			mc.counters[name] = counter
 		}
 	}
 
-	return metrics
+	counter.Add(float64(value))
+}
+
+func (mc *PrometheusMetricsCollector) RecordGauge(name string, value float64) {
+	mc.mu.RLock()
+	gauge, exists := mc.gauges[name]
+	mc.mu.RUnlock()
+
+	if !exists {
+		mc.mu.Lock()
+		defer mc.mu.Unlock()
+		// Double-check after acquiring write lock
+		if gauge, exists = mc.gauges[name]; !exists {
+			gauge = prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: name + "_current",
+				Help: "Gauge for " + name,
+			})
+			if err := mc.registry.Register(gauge); err != nil {
+				// If registration fails, create a no-op gauge
+				gauge = prometheus.NewGauge(prometheus.GaugeOpts{})
+			}
+			mc.gauges[name] = gauge
+		}
+	}
+
+	gauge.Set(value)
+}
+
+func (mc *PrometheusMetricsCollector) RecordHistogram(name string, value float64) {
+	mc.mu.RLock()
+	histogram, exists := mc.histograms[name]
+	mc.mu.RUnlock()
+
+	if !exists {
+		mc.mu.Lock()
+		defer mc.mu.Unlock()
+		// Double-check after acquiring write lock
+		if histogram, exists = mc.histograms[name]; !exists {
+			histogram = prometheus.NewHistogram(prometheus.HistogramOpts{
+				Name:    name + "_duration",
+				Help:    "Histogram for " + name,
+				Buckets: prometheus.DefBuckets,
+			})
+			if err := mc.registry.Register(histogram); err != nil {
+				// If registration fails, create a no-op histogram
+				histogram = prometheus.NewHistogram(prometheus.HistogramOpts{})
+			}
+			mc.histograms[name] = histogram
+		}
+	}
+
+	histogram.Observe(value)
+}
+
+// GetMetrics returns a copy of all metrics (for backward compatibility)
+func (mc *PrometheusMetricsCollector) GetMetrics() map[string]interface{} {
+	// This method is kept for backward compatibility but Prometheus metrics
+	// are automatically exposed via HTTP endpoint
+	return map[string]interface{}{
+		"prometheus_metrics": "available_at_/metrics_endpoint",
+	}
 }
 
 // RateLimiter implements rate limiting for logging
@@ -461,4 +504,19 @@ func computeHistogramStats(values []float64) map[string]float64 {
 		"min":   min,
 		"max":   max,
 	}
+}
+
+// StartPrometheusMetricsServer starts a Prometheus metrics server
+func StartPrometheusMetricsServer(addr string) error {
+	http.Handle("/metrics", promhttp.Handler())
+	return http.ListenAndServe(addr, nil)
+}
+
+// StartPrometheusMetricsServerWithMux starts a Prometheus metrics server with a custom mux
+func StartPrometheusMetricsServerWithMux(addr string, mux *http.ServeMux) error {
+	if mux == nil {
+		mux = http.NewServeMux()
+	}
+	mux.Handle("/metrics", promhttp.Handler())
+	return http.ListenAndServe(addr, mux)
 }

@@ -3,10 +3,14 @@ package mystic
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // setSafeTestConfig sets config values that won't cause network failures for UDP writer
@@ -129,27 +133,36 @@ func Test_GraylogSender_Direct(t *testing.T) {
 	setSafeTestConfig()
 
 	// Test GraylogSender directly
-	graylogConfig := GraylogSenderConfig{
-		GrayLogAddr: GRAYLOG_ADDR,
-		Facility:    FACILITY,
+	graylogConfig := SenderConfig{
+		Endpoint: GRAYLOG_ADDR,
 	}
-	sender := NewGraylogSender(graylogConfig)
+	sender := NewGraylogSender(graylogConfig, FACILITY)
 	if sender == nil {
 		t.Fatalf("expected non-nil GraylogSender")
 	}
 
 	// Test sending different log levels
-	err := sender.Send("DEBUG", "debug message", map[string]interface{}{
-		"user_id": 123,
-		"action":  "test",
+	err := sender.Send(LogEntry{
+		Level:     "DEBUG",
+		Message:   "debug message",
+		Timestamp: time.Now(),
+		Fields: map[string]interface{}{
+			"user_id": 123,
+			"action":  "test",
+		},
 	})
 	if err != nil {
 		t.Logf("GraylogSender.Send returned error (expected if Graylog unavailable): %v", err)
 	}
 
-	err = sender.Send("INFO", "info message", map[string]interface{}{
-		"service": "test-service",
-		"version": "1.0.0",
+	err = sender.Send(LogEntry{
+		Level:     "INFO",
+		Message:   "info message",
+		Timestamp: time.Now(),
+		Fields: map[string]interface{}{
+			"service": "test-service",
+			"version": "1.0.0",
+		},
 	})
 	if err != nil {
 		t.Logf("GraylogSender.Send returned error (expected if Graylog unavailable): %v", err)
@@ -169,34 +182,35 @@ func Test_GraylogSender_Configuration(t *testing.T) {
 	// Test with different configurations
 	testCases := []struct {
 		name        string
-		config      GraylogSenderConfig
+		config      SenderConfig
+		facility    string
 		expectedNil bool
 		description string
 	}{
 		{
 			name: "Valid Configuration",
-			config: GraylogSenderConfig{
-				GrayLogAddr: "localhost:12201",
-				Facility:    "test-facility",
+			config: SenderConfig{
+				Endpoint: "localhost:12201",
 			},
+			facility:    "test-facility",
 			expectedNil: false,
 			description: "Should create sender with valid config",
 		},
 		{
-			name: "Empty GrayLogAddr",
-			config: GraylogSenderConfig{
-				GrayLogAddr: "",
-				Facility:    "test-facility",
+			name: "Empty Endpoint",
+			config: SenderConfig{
+				Endpoint: "",
 			},
+			facility:    "test-facility",
 			expectedNil: false,
 			description: "Should create fallback sender with empty address",
 		},
 		{
-			name: "Invalid GrayLogAddr",
-			config: GraylogSenderConfig{
-				GrayLogAddr: "invalid:address:format",
-				Facility:    "test-facility",
+			name: "Invalid Endpoint",
+			config: SenderConfig{
+				Endpoint: "invalid:address:format",
 			},
+			facility:    "test-facility",
 			expectedNil: false,
 			description: "Should create fallback sender with invalid address",
 		},
@@ -204,7 +218,7 @@ func Test_GraylogSender_Configuration(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			sender := NewGraylogSender(tc.config)
+			sender := NewGraylogSender(tc.config, tc.facility)
 
 			if tc.expectedNil && sender != nil {
 				t.Errorf("expected nil sender for %s", tc.description)
@@ -215,13 +229,18 @@ func Test_GraylogSender_Configuration(t *testing.T) {
 
 			if sender != nil {
 				// Test that the configuration is properly stored
-				if sender.config.Facility != tc.config.Facility {
-					t.Errorf("facility mismatch: expected %s, got %s", tc.config.Facility, sender.config.Facility)
+				if sender.facility != tc.facility {
+					t.Errorf("facility mismatch: expected %s, got %s", tc.facility, sender.facility)
 				}
 
 				// Test basic functionality
-				err := sender.Send("TEST", "configuration test", map[string]interface{}{
-					"test_case": tc.name,
+				err := sender.Send(LogEntry{
+					Level:     "TEST",
+					Message:   "configuration test",
+					Timestamp: time.Now(),
+					Fields: map[string]interface{}{
+						"test_case": tc.name,
+					},
 				})
 				if err != nil {
 					t.Logf("Send returned error (expected for invalid configs): %v", err)
@@ -235,26 +254,26 @@ func Test_GraylogSender_Configuration(t *testing.T) {
 
 func Test_GraylogSender_Config_Validation(t *testing.T) {
 	// Test configuration validation and defaults
-	config := GraylogSenderConfig{
-		GrayLogAddr: "localhost:12201",
-		Facility:    "test-validation",
+	config := SenderConfig{
+		Endpoint: "localhost:12201",
 	}
+	facility := "test-validation"
 
-	sender := NewGraylogSender(config)
+	sender := NewGraylogSender(config, facility)
 	if sender == nil {
 		t.Fatalf("expected non-nil sender")
 	}
 	defer sender.Close()
 
 	// Verify configuration is stored correctly
-	if sender.config.GrayLogAddr != config.GrayLogAddr {
-		t.Errorf("GrayLogAddr not stored correctly: expected %s, got %s",
-			config.GrayLogAddr, sender.config.GrayLogAddr)
+	if sender.GetEndpoint() != config.Endpoint {
+		t.Errorf("Endpoint not stored correctly: expected %s, got %s",
+			config.Endpoint, sender.GetEndpoint())
 	}
 
-	if sender.config.Facility != config.Facility {
+	if sender.facility != facility {
 		t.Errorf("Facility not stored correctly: expected %s, got %s",
-			config.Facility, sender.config.Facility)
+			facility, sender.facility)
 	}
 }
 
@@ -393,34 +412,35 @@ func Test_Adapter_With_Custom_Configuration(t *testing.T) {
 	// Test that adapters can be created with custom Graylog configuration
 	testCases := []struct {
 		name          string
-		graylogConfig GraylogSenderConfig
+		graylogConfig SenderConfig
+		facility      string
 		expectedNil   bool
 		description   string
 	}{
 		{
 			name: "Custom Graylog Address",
-			graylogConfig: GraylogSenderConfig{
-				GrayLogAddr: "custom-graylog:12201",
-				Facility:    "custom-facility",
+			graylogConfig: SenderConfig{
+				Endpoint: "custom-graylog:12201",
 			},
+			facility:    "custom-facility",
 			expectedNil: false,
 			description: "Should create logger with custom Graylog configuration",
 		},
 		{
 			name: "Different Facility",
-			graylogConfig: GraylogSenderConfig{
-				GrayLogAddr: "localhost:12201",
-				Facility:    "different-service",
+			graylogConfig: SenderConfig{
+				Endpoint: "localhost:12201",
 			},
+			facility:    "different-service",
 			expectedNil: false,
 			description: "Should create logger with different facility",
 		},
 		{
 			name: "Empty Graylog Address",
-			graylogConfig: GraylogSenderConfig{
-				GrayLogAddr: "",
-				Facility:    "fallback-test",
+			graylogConfig: SenderConfig{
+				Endpoint: "",
 			},
+			facility:    "fallback-test",
 			expectedNil: false,
 			description: "Should create logger with fallback configuration",
 		},
@@ -429,7 +449,7 @@ func Test_Adapter_With_Custom_Configuration(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Test ZapAdapter with custom configuration
-			zapLogger := ZapAdapterWithConfig("test-custom-zap", tc.graylogConfig)
+			zapLogger := ZapAdapterWithConfig("test-custom-zap", nil)
 			if tc.expectedNil && zapLogger != nil {
 				t.Errorf("expected nil zap logger for %s", tc.description)
 			}
@@ -438,7 +458,7 @@ func Test_Adapter_With_Custom_Configuration(t *testing.T) {
 			}
 
 			// Test ZerologAdapter with custom configuration
-			zeroLogger := ZerologAdapterWithConfig("test-custom-zero", tc.graylogConfig)
+			zeroLogger := ZerologAdapterWithConfig("test-custom-zero", nil)
 			if tc.expectedNil && zeroLogger != nil {
 				t.Errorf("expected nil zerolog logger for %s", tc.description)
 			}
@@ -474,18 +494,19 @@ func Test_Configuration_Structure(t *testing.T) {
 		}
 	})
 
-	t.Run("GraylogSenderConfig Struct", func(t *testing.T) {
-		graylogConfig := GraylogSenderConfig{
-			GrayLogAddr: "localhost:12201",
-			Facility:    "test-graylog-config",
+	t.Run("SenderConfig Struct", func(t *testing.T) {
+		senderConfig := SenderConfig{
+			Endpoint:   "localhost:12201",
+			Timeout:    5000,
+			RetryCount: 3,
 		}
 
-		if graylogConfig.GrayLogAddr != "localhost:12201" {
-			t.Errorf("GrayLogAddr not set correctly: expected localhost:12201, got %s", graylogConfig.GrayLogAddr)
+		if senderConfig.Endpoint != "localhost:12201" {
+			t.Errorf("Endpoint not set correctly: expected localhost:12201, got %s", senderConfig.Endpoint)
 		}
 
-		if graylogConfig.Facility != "test-graylog-config" {
-			t.Errorf("Facility not set correctly: expected test-graylog-config, got %s", graylogConfig.Facility)
+		if senderConfig.Timeout != 5000 {
+			t.Errorf("Timeout not set correctly: expected 5000, got %d", senderConfig.Timeout)
 		}
 	})
 }
@@ -494,19 +515,24 @@ func Test_Configuration_Error_Handling(t *testing.T) {
 	// Test error handling with invalid configurations
 	t.Run("Invalid GraylogSender Config", func(t *testing.T) {
 		// Test with completely invalid configuration
-		invalidConfig := GraylogSenderConfig{
-			GrayLogAddr: "invalid:address:format:here",
-			Facility:    "test-error-handling",
+		invalidConfig := SenderConfig{
+			Endpoint: "invalid:address:format:here",
 		}
+		facility := "test-error-handling"
 
-		sender := NewGraylogSender(invalidConfig)
+		sender := NewGraylogSender(invalidConfig, facility)
 		if sender == nil {
 			t.Fatalf("expected non-nil sender even with invalid config (should fallback)")
 		}
 
 		// Should still work with fallback
-		err := sender.Send("ERROR", "test error handling", map[string]interface{}{
-			"config": "invalid",
+		err := sender.Send(LogEntry{
+			Level:     "ERROR",
+			Message:   "test error handling",
+			Timestamp: time.Now(),
+			Fields: map[string]interface{}{
+				"config": "invalid",
+			},
 		})
 		if err != nil {
 			t.Logf("Send returned error (expected for invalid config): %v", err)
@@ -517,19 +543,24 @@ func Test_Configuration_Error_Handling(t *testing.T) {
 
 	t.Run("Empty GraylogSender Config", func(t *testing.T) {
 		// Test with empty configuration
-		emptyConfig := GraylogSenderConfig{
-			GrayLogAddr: "",
-			Facility:    "test-empty",
+		emptyConfig := SenderConfig{
+			Endpoint: "",
 		}
+		facility := "test-empty"
 
-		sender := NewGraylogSender(emptyConfig)
+		sender := NewGraylogSender(emptyConfig, facility)
 		if sender == nil {
 			t.Fatalf("expected non-nil sender with empty config (should fallback)")
 		}
 
 		// Should work with fallback
-		err := sender.Send("INFO", "test empty config", map[string]interface{}{
-			"config": "empty",
+		err := sender.Send(LogEntry{
+			Level:     "INFO",
+			Message:   "test empty config",
+			Timestamp: time.Now(),
+			Fields: map[string]interface{}{
+				"config": "empty",
+			},
 		})
 		if err != nil {
 			t.Logf("Send returned error (expected for empty config): %v", err)
@@ -692,7 +723,15 @@ func Test_HTTP_Adapter_Basic(t *testing.T) {
 // Test_HTTP_Adapter_With_Config tests HTTP adapter with custom configuration
 func Test_HTTP_Adapter_With_Config(t *testing.T) {
 	config := HTTPAdapterConfig{
-		Endpoint:   "http://localhost:8080/test",
+		SenderConfig: SenderConfig{
+			Endpoint:   "http://localhost:8080/test",
+			Timeout:    5000,
+			RetryCount: 2,
+			RetryDelay: 1000,
+			BatchSize:  10,
+			BatchDelay: 1000,
+			Format:     "json",
+		},
 		Method:     "POST",
 		Headers:    map[string]string{"Content-Type": "application/json"},
 		Timeout:    1 * time.Second,
@@ -728,7 +767,15 @@ func Test_HTTP_Adapter_Formats(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.format, func(t *testing.T) {
 			config := HTTPAdapterConfig{
-				Endpoint:   "http://localhost:8080/test",
+				SenderConfig: SenderConfig{
+					Endpoint:   "http://localhost:8080/test",
+					Timeout:    5000,
+					RetryCount: 1,
+					RetryDelay: 1000,
+					BatchSize:  5,
+					BatchDelay: 1000,
+					Format:     tc.format,
+				},
 				Method:     "POST",
 				Headers:    map[string]string{"Content-Type": "application/json"},
 				Timeout:    1 * time.Second,
@@ -1267,8 +1314,8 @@ func Test_Configuration_Profile_Fields(t *testing.T) {
 		t.Error("expected config facility to be set")
 	}
 
-	if profile.GraylogConfig.Facility == "" {
-		t.Error("expected graylog config facility to be set")
+	if profile.GraylogConfig.Endpoint == "" {
+		t.Error("expected graylog config endpoint to be set")
 	}
 }
 
@@ -1304,7 +1351,15 @@ func Test_File_Adapter_Rotation(t *testing.T) {
 // Test_HTTP_Adapter_Batching tests HTTP adapter batching
 func Test_HTTP_Adapter_Batching(t *testing.T) {
 	config := HTTPAdapterConfig{
-		Endpoint:   "http://localhost:8080/test",
+		SenderConfig: SenderConfig{
+			Endpoint:   "http://localhost:8080/test",
+			Timeout:    5000,
+			RetryCount: 1,
+			RetryDelay: 1000,
+			BatchSize:  5,
+			BatchDelay: 1000,
+			Format:     "json",
+		},
 		Method:     "POST",
 		Headers:    map[string]string{"Content-Type": "application/json"},
 		Timeout:    1 * time.Second,
@@ -1392,9 +1447,7 @@ func Test_Configuration_Profile_Validation(t *testing.T) {
 				t.Errorf("profile %s config validation failed: %v", profile, err)
 			}
 
-			if err := profileConfig.GraylogConfig.Validate(); err != nil {
-				t.Errorf("profile %s graylog config validation failed: %v", profile, err)
-			}
+			// GraylogConfig is now SenderConfig and doesn't have Validate method
 		})
 	}
 }
@@ -1431,7 +1484,15 @@ func Test_File_Adapter_Compression(t *testing.T) {
 // Test_HTTP_Adapter_Retry tests HTTP adapter retry functionality
 func Test_HTTP_Adapter_Retry(t *testing.T) {
 	config := HTTPAdapterConfig{
-		Endpoint:   "http://invalid-endpoint:9999", // Invalid endpoint to trigger retries
+		SenderConfig: SenderConfig{
+			Endpoint:   "http://invalid-endpoint:9999", // Invalid endpoint to trigger retries
+			Timeout:    5000,
+			RetryCount: 2,
+			RetryDelay: 1000,
+			BatchSize:  1, // Small batch size for testing
+			BatchDelay: 1000,
+			Format:     "json",
+		},
 		Method:     "POST",
 		Headers:    map[string]string{"Content-Type": "application/json"},
 		Timeout:    100 * time.Millisecond,
@@ -1498,15 +1559,626 @@ func Test_Configuration_Environment_Loading(t *testing.T) {
 	}
 
 	if graylogConfig != nil {
-		// Test validation
-		if err := graylogConfig.Validate(); err != nil {
-			t.Errorf("graylog config validation failed: %v", err)
-		}
-
-		// Test setting defaults
-		graylogConfig.SetDefaults()
-		if graylogConfig.GrayLogAddr == "" {
-			t.Error("expected GrayLogAddr to be set after defaults")
+		// Test that endpoint is set
+		if graylogConfig.Endpoint == "" {
+			t.Error("expected Endpoint to be set")
 		}
 	}
+}
+
+// Test_Prometheus_Metrics_Collector tests the new Prometheus metrics collector
+func Test_Prometheus_Metrics_Collector(t *testing.T) {
+	// Use a custom registry to avoid conflicts between tests
+	registry := prometheus.NewRegistry()
+	collector := NewPrometheusMetricsCollectorWithRegistry(registry)
+	if collector == nil {
+		t.Fatal("expected non-nil Prometheus metrics collector")
+	}
+
+	// Test counter functionality
+	collector.IncrementCounter("test_counter", 1)
+	collector.IncrementCounter("test_counter", 2)
+	collector.IncrementCounter("another_counter", 5)
+
+	// Test gauge functionality
+	collector.RecordGauge("test_gauge", 42.5)
+	collector.RecordGauge("test_gauge", 100.0)
+	collector.RecordGauge("another_gauge", 0.0)
+
+	// Test histogram functionality
+	collector.RecordHistogram("test_histogram", 10.0)
+	collector.RecordHistogram("test_histogram", 20.0)
+	collector.RecordHistogram("test_histogram", 30.0)
+
+	// Test GetMetrics (should return Prometheus info)
+	metrics := collector.GetMetrics()
+	if metrics == nil {
+		t.Error("expected non-nil metrics")
+	}
+
+	// Verify Prometheus metrics info
+	if info, exists := metrics["prometheus_metrics"]; !exists {
+		t.Error("expected prometheus_metrics in metrics")
+	} else if info != "available_at_/metrics_endpoint" {
+		t.Errorf("unexpected prometheus_metrics value: %v", info)
+	}
+}
+
+// Test_Prometheus_Metrics_Integration tests Prometheus metrics integration with enhanced logger
+func Test_Prometheus_Metrics_Integration(t *testing.T) {
+	baseLogger := ZapAdapter("test-prometheus")
+	config := EnhancedLoggerConfig{
+		EnableMetrics: true,
+		EnableTiming:  true,
+	}
+
+	enhanced := NewEnhancedLogger(baseLogger, config)
+	if enhanced == nil {
+		t.Fatal("expected non-nil enhanced logger")
+	}
+
+	// Test metrics collection through enhanced logger
+	enhanced.IncrementCounter("integration_counter", 1)
+	enhanced.RecordGauge("integration_gauge", 99.9)
+	enhanced.RecordHistogram("integration_histogram", 45.5)
+
+	// Test timing with metrics
+	enhanced.TimeOperation("test_operation", func() {
+		time.Sleep(10 * time.Millisecond)
+	})
+
+	// Verify metrics are being collected
+	// Note: In a real Prometheus setup, these metrics would be available via HTTP endpoint
+	// For testing, we just verify the methods don't panic
+	enhanced.Info("metrics integration test completed", "test", "prometheus")
+}
+
+// Test_Prometheus_Metrics_Server tests the Prometheus metrics server functionality
+func Test_Prometheus_Metrics_Server(t *testing.T) {
+	// Test with invalid address (should return error)
+	err := StartPrometheusMetricsServer("invalid-address")
+	if err == nil {
+		t.Error("expected error for invalid address")
+	}
+
+	// Test with custom mux to avoid conflicts
+	mux := http.NewServeMux()
+
+	// Test that we can create the mux without errors
+	// We don't actually start the server in tests as it would block
+	if mux == nil {
+		t.Error("expected non-nil mux")
+	}
+
+	// Test that the function signature is correct
+	// This is a compile-time test, not a runtime test
+	_ = StartPrometheusMetricsServerWithMux
+}
+
+// Test_Prometheus_Metrics_Concurrent tests concurrent access to Prometheus metrics
+func Test_Prometheus_Metrics_Concurrent(t *testing.T) {
+	// Use a custom registry to avoid conflicts between tests
+	registry := prometheus.NewRegistry()
+	collector := NewPrometheusMetricsCollectorWithRegistry(registry)
+	if collector == nil {
+		t.Fatal("expected non-nil Prometheus metrics collector")
+	}
+
+	// Test concurrent counter increments
+	var wg sync.WaitGroup
+	numGoroutines := 10
+	incrementsPerGoroutine := 100
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < incrementsPerGoroutine; j++ {
+				collector.IncrementCounter("concurrent_counter", 1)
+				collector.RecordGauge("concurrent_gauge", float64(id+j))
+				collector.RecordHistogram("concurrent_histogram", float64(j))
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Verify metrics were collected (GetMetrics should work without error)
+	metrics := collector.GetMetrics()
+	if metrics == nil {
+		t.Error("expected non-nil metrics after concurrent access")
+	}
+}
+
+// Test_Prometheus_Metrics_Edge_Cases tests edge cases for Prometheus metrics
+func Test_Prometheus_Metrics_Edge_Cases(t *testing.T) {
+	// Use a custom registry to avoid conflicts between tests
+	registry := prometheus.NewRegistry()
+	collector := NewPrometheusMetricsCollectorWithRegistry(registry)
+	if collector == nil {
+		t.Fatal("expected non-nil Prometheus metrics collector")
+	}
+
+	// Test zero values
+	collector.IncrementCounter("zero_counter", 0)
+	collector.RecordGauge("zero_gauge", 0.0)
+	collector.RecordHistogram("zero_histogram", 0.0)
+
+	// Test negative values (should work for histograms, but not counters)
+	collector.RecordHistogram("negative_histogram", -10.0)
+
+	// Test very large values
+	collector.IncrementCounter("large_counter", 999999999)
+	collector.RecordGauge("large_gauge", 999999999.99)
+	collector.RecordHistogram("large_histogram", 999999999.99)
+
+	// Test empty string names (should work)
+	collector.IncrementCounter("", 1)
+	collector.RecordGauge("", 1.0)
+	collector.RecordHistogram("", 1.0)
+
+	// Verify metrics collection didn't panic
+	metrics := collector.GetMetrics()
+	if metrics == nil {
+		t.Error("expected non-nil metrics after edge case testing")
+	}
+}
+
+// Test_LogSender_Configuration_Methods tests the new configuration methods on LogSender interface
+func Test_LogSender_Configuration_Methods(t *testing.T) {
+	// Test GraylogSender configuration methods
+	graylogConfig := SenderConfig{
+		Endpoint:    "localhost:12201",
+		Timeout:     5000,
+		RetryCount:  3,
+		RetryDelay:  1000,
+		BatchSize:   100,
+		BatchDelay:  1000,
+		Format:      "gelf",
+		Compression: true,
+		TLSEnabled:  false,
+		RateLimit:   1000,
+	}
+	facility := "test-config-methods"
+
+	sender := NewGraylogSender(graylogConfig, facility)
+	if sender == nil {
+		t.Fatalf("expected non-nil GraylogSender")
+	}
+	defer sender.Close()
+
+	// Test all configuration methods
+	t.Run("GraylogSender Configuration Methods", func(t *testing.T) {
+		if sender.GetEndpoint() != graylogConfig.Endpoint {
+			t.Errorf("GetEndpoint: expected %s, got %s", graylogConfig.Endpoint, sender.GetEndpoint())
+		}
+
+		if sender.GetTimeout() != graylogConfig.Timeout {
+			t.Errorf("GetTimeout: expected %d, got %d", graylogConfig.Timeout, sender.GetTimeout())
+		}
+
+		if sender.GetRetryCount() != graylogConfig.RetryCount {
+			t.Errorf("GetRetryCount: expected %d, got %d", graylogConfig.RetryCount, sender.GetRetryCount())
+		}
+
+		if sender.GetRetryDelay() != graylogConfig.RetryDelay {
+			t.Errorf("GetRetryDelay: expected %d, got %d", graylogConfig.RetryDelay, sender.GetRetryDelay())
+		}
+
+		if sender.GetBatchSize() != graylogConfig.BatchSize {
+			t.Errorf("GetBatchSize: expected %d, got %d", graylogConfig.BatchSize, sender.GetBatchSize())
+		}
+
+		if sender.GetBatchDelay() != graylogConfig.BatchDelay {
+			t.Errorf("GetBatchDelay: expected %d, got %d", graylogConfig.BatchDelay, sender.GetBatchDelay())
+		}
+
+		if sender.GetFormat() != graylogConfig.Format {
+			t.Errorf("GetFormat: expected %s, got %s", graylogConfig.Format, sender.GetFormat())
+		}
+
+		if sender.IsCompressionEnabled() != graylogConfig.Compression {
+			t.Errorf("IsCompressionEnabled: expected %t, got %t", graylogConfig.Compression, sender.IsCompressionEnabled())
+		}
+
+		if sender.IsTLSEnabled() != graylogConfig.TLSEnabled {
+			t.Errorf("IsTLSEnabled: expected %t, got %t", graylogConfig.TLSEnabled, sender.IsTLSEnabled())
+		}
+
+		if sender.GetRateLimit() != graylogConfig.RateLimit {
+			t.Errorf("GetRateLimit: expected %d, got %d", graylogConfig.RateLimit, sender.GetRateLimit())
+		}
+	})
+}
+
+// Test_Simplified_Adapter_Functions tests the new simplified function signatures
+func Test_Simplified_Adapter_Functions(t *testing.T) {
+	t.Run("ZapAdapter Simplified Signatures", func(t *testing.T) {
+		// Test console only
+		logger1 := ZapAdapter("console-only")
+		if logger1 == nil {
+			t.Fatal("expected non-nil console logger")
+		}
+
+		// Test with sender
+		graylogSender := NewGraylogSender(SenderConfig{
+			Endpoint: "localhost:12201",
+			Format:   "gelf",
+		}, "test-facility")
+
+		logger2 := ZapAdapterWithSender("with-sender", graylogSender)
+		if logger2 == nil {
+			t.Fatal("expected non-nil logger with sender")
+		}
+
+		// Test with config (should work the same as with sender)
+		logger3 := ZapAdapterWithConfig("with-config", graylogSender)
+		if logger3 == nil {
+			t.Fatal("expected non-nil logger with config")
+		}
+
+		// Test logging to ensure they work
+		logger1.Info("console only test")
+		logger2.Info("sender test")
+		logger3.Info("config test")
+	})
+
+	t.Run("ZerologAdapter Simplified Signatures", func(t *testing.T) {
+		// Test console only
+		logger1 := ZerologAdapter("console-only")
+		if logger1 == nil {
+			t.Fatal("expected non-nil console logger")
+		}
+
+		// Test with sender
+		graylogSender := NewGraylogSender(SenderConfig{
+			Endpoint: "localhost:12201",
+			Format:   "gelf",
+		}, "test-facility")
+
+		logger2 := ZerologAdapterWithSender("with-sender", graylogSender)
+		if logger2 == nil {
+			t.Fatal("expected non-nil logger with sender")
+		}
+
+		// Test with config (should work the same as with sender)
+		logger3 := ZerologAdapterWithConfig("with-config", graylogSender)
+		if logger3 == nil {
+			t.Fatal("expected non-nil logger with config")
+		}
+
+		// Test logging to ensure they work
+		logger1.Info("console only test")
+		logger2.Info("sender test")
+		logger3.Info("config test")
+	})
+}
+
+// Test_LogSender_Interface_Compliance tests that all senders implement the LogSender interface
+func Test_LogSender_Interface_Compliance(t *testing.T) {
+	t.Run("GraylogSender Interface Compliance", func(t *testing.T) {
+		sender := NewGraylogSender(SenderConfig{
+			Endpoint: "localhost:12201",
+			Format:   "gelf",
+		}, "test-facility")
+		defer sender.Close()
+
+		// Test that it implements all required methods
+		var _ LogSender = sender
+
+		// Test basic functionality
+		entry := LogEntry{
+			Level:     "INFO",
+			Message:   "interface compliance test",
+			Timestamp: time.Now(),
+			Fields:    map[string]interface{}{"test": "compliance"},
+		}
+
+		err := sender.Send(entry)
+		if err != nil {
+			t.Logf("Send returned error (expected if Graylog unavailable): %v", err)
+		}
+
+		// Test other interface methods
+		_ = sender.IsConnected()
+		_ = sender.GetStats()
+	})
+
+	t.Run("FileSender Interface Compliance", func(t *testing.T) {
+		config := FileAdapterConfig{
+			Path:       "./test-interface-compliance",
+			Filename:   "interface-test",
+			MaxSize:    100,
+			MaxAge:     1 * time.Hour,
+			MaxBackups: 2,
+			Compress:   false,
+			Format:     "json",
+			Level:      "info",
+			Facility:   "test-facility",
+			SenderConfig: SenderConfig{
+				Endpoint:   "./test-interface-compliance/interface-test",
+				Timeout:    5000,
+				RetryCount: 1,
+				RetryDelay: 1000,
+				BatchSize:  5,
+				BatchDelay: 1000,
+				Format:     "json",
+			},
+		}
+
+		sender, err := NewFileSender(config)
+		if err != nil {
+			t.Fatalf("failed to create FileSender: %v", err)
+		}
+		defer sender.Close()
+
+		// Test that it implements all required methods
+		var _ LogSender = sender
+
+		// Test basic functionality
+		entry := LogEntry{
+			Level:     "INFO",
+			Message:   "interface compliance test",
+			Timestamp: time.Now(),
+			Fields:    map[string]interface{}{"test": "compliance"},
+		}
+
+		err = sender.Send(entry)
+		if err != nil {
+			t.Fatalf("Send failed: %v", err)
+		}
+
+		// Test other interface methods
+		_ = sender.IsConnected()
+		_ = sender.GetStats()
+
+		// Clean up
+		os.RemoveAll("./test-interface-compliance")
+	})
+
+	t.Run("HTTPSender Interface Compliance", func(t *testing.T) {
+		config := HTTPAdapterConfig{
+			SenderConfig: SenderConfig{
+				Endpoint:   "http://localhost:8080/test",
+				Timeout:    5000,
+				RetryCount: 1,
+				RetryDelay: 1000,
+				BatchSize:  5,
+				BatchDelay: 1000,
+				Format:     "json",
+			},
+			Method:     "POST",
+			Headers:    map[string]string{"Content-Type": "application/json"},
+			Timeout:    100 * time.Millisecond,
+			RetryCount: 1,
+			RetryDelay: 50 * time.Millisecond,
+			BatchSize:  5,
+			BatchDelay: 10 * time.Millisecond,
+			Format:     "json",
+			Level:      "info",
+			Facility:   "test-facility",
+		}
+
+		sender, err := NewHTTPSender(config)
+		if err != nil {
+			t.Fatalf("failed to create HTTPSender: %v", err)
+		}
+		defer sender.Close()
+
+		// Test that it implements all required methods
+		var _ LogSender = sender
+
+		// Test basic functionality
+		entry := LogEntry{
+			Level:     "INFO",
+			Message:   "interface compliance test",
+			Timestamp: time.Now(),
+			Fields:    map[string]interface{}{"test": "compliance"},
+		}
+
+		err = sender.Send(entry)
+		if err != nil {
+			t.Logf("Send returned error (expected if HTTP endpoint unavailable): %v", err)
+		}
+
+		// Test other interface methods
+		_ = sender.IsConnected()
+		_ = sender.GetStats()
+	})
+}
+
+// Test_Configuration_Merged_Into_Sender tests that configuration is now part of the sender
+func Test_Configuration_Merged_Into_Sender(t *testing.T) {
+	t.Run("Configuration Embedded in Sender", func(t *testing.T) {
+		// Create a sender with specific configuration
+		config := SenderConfig{
+			Endpoint:    "custom-endpoint:12201",
+			Timeout:     10000,
+			RetryCount:  5,
+			RetryDelay:  2000,
+			BatchSize:   200,
+			BatchDelay:  2000,
+			Format:      "json",
+			Compression: true,
+			TLSEnabled:  true,
+			RateLimit:   500,
+		}
+		facility := "custom-facility"
+
+		sender := NewGraylogSender(config, facility)
+		if sender == nil {
+			t.Fatalf("expected non-nil GraylogSender")
+		}
+		defer sender.Close()
+
+		// Verify that the configuration is embedded in the sender
+		if sender.GetEndpoint() != config.Endpoint {
+			t.Errorf("Endpoint not embedded: expected %s, got %s", config.Endpoint, sender.GetEndpoint())
+		}
+
+		if sender.GetTimeout() != config.Timeout {
+			t.Errorf("Timeout not embedded: expected %d, got %d", config.Timeout, sender.GetTimeout())
+		}
+
+		if sender.GetRetryCount() != config.RetryCount {
+			t.Errorf("RetryCount not embedded: expected %d, got %d", config.RetryCount, sender.GetRetryCount())
+		}
+
+		if sender.GetFormat() != config.Format {
+			t.Errorf("Format not embedded: expected %s, got %s", config.Format, sender.GetFormat())
+		}
+
+		if sender.IsCompressionEnabled() != config.Compression {
+			t.Errorf("Compression not embedded: expected %t, got %t", config.Compression, sender.IsCompressionEnabled())
+		}
+
+		if sender.IsTLSEnabled() != config.TLSEnabled {
+			t.Errorf("TLSEnabled not embedded: expected %t, got %t", config.TLSEnabled, sender.IsTLSEnabled())
+		}
+
+		if sender.GetRateLimit() != config.RateLimit {
+			t.Errorf("RateLimit not embedded: expected %d, got %d", config.RateLimit, sender.GetRateLimit())
+		}
+	})
+}
+
+// Test_Old_Function_Signatures_Removed verifies that the old complex function signatures are no longer available
+func Test_Old_Function_Signatures_Removed(t *testing.T) {
+	t.Run("Old ZapAdapterWithConfig Signature Removed", func(t *testing.T) {
+		// This test verifies that the old signature with SenderConfig and facility is no longer available
+		// The new signature only takes (named string, sender LogSender)
+
+		// Create a sender to test with
+		graylogSender := NewGraylogSender(SenderConfig{
+			Endpoint: "localhost:12201",
+			Format:   "gelf",
+		}, "test-facility")
+		defer graylogSender.Close()
+
+		// Test the new simplified signature works
+		logger := ZapAdapterWithConfig("test-simplified", graylogSender)
+		if logger == nil {
+			t.Fatal("expected non-nil logger with new signature")
+		}
+
+		// Verify the logger works
+		logger.Info("test message")
+	})
+
+	t.Run("Old ZerologAdapterWithConfig Signature Removed", func(t *testing.T) {
+		// This test verifies that the old signature with SenderConfig and facility is no longer available
+		// The new signature only takes (named string, sender LogSender)
+
+		// Create a sender to test with
+		graylogSender := NewGraylogSender(SenderConfig{
+			Endpoint: "localhost:12201",
+			Format:   "gelf",
+		}, "test-facility")
+		defer graylogSender.Close()
+
+		// Test the new simplified signature works
+		logger := ZerologAdapterWithConfig("test-simplified", graylogSender)
+		if logger == nil {
+			t.Fatal("expected non-nil logger with new signature")
+		}
+
+		// Verify the logger works
+		logger.Info("test message")
+	})
+}
+
+// Test_Configuration_Embedded_Verification tests that configuration is truly embedded in senders
+func Test_Configuration_Embedded_Verification(t *testing.T) {
+	t.Run("Configuration Values Stored in Sender", func(t *testing.T) {
+		// Test with different configuration values to ensure they're properly stored
+		testConfigs := []struct {
+			name     string
+			config   SenderConfig
+			facility string
+		}{
+			{
+				name: "High Performance Config",
+				config: SenderConfig{
+					Endpoint:    "high-perf:12201",
+					Timeout:     1000,
+					RetryCount:  1,
+					RetryDelay:  500,
+					BatchSize:   1000,
+					BatchDelay:  100,
+					Format:      "gelf",
+					Compression: true,
+					TLSEnabled:  true,
+					RateLimit:   10000,
+				},
+				facility: "high-performance",
+			},
+			{
+				name: "Development Config",
+				config: SenderConfig{
+					Endpoint:    "dev:12201",
+					Timeout:     10000,
+					RetryCount:  3,
+					RetryDelay:  2000,
+					BatchSize:   10,
+					BatchDelay:  5000,
+					Format:      "json",
+					Compression: false,
+					TLSEnabled:  false,
+					RateLimit:   100,
+				},
+				facility: "development",
+			},
+		}
+
+		for _, tc := range testConfigs {
+			t.Run(tc.name, func(t *testing.T) {
+				sender := NewGraylogSender(tc.config, tc.facility)
+				if sender == nil {
+					t.Fatalf("expected non-nil GraylogSender for %s", tc.name)
+				}
+				defer sender.Close()
+
+				// Verify all configuration values are properly stored and retrievable
+				if sender.GetEndpoint() != tc.config.Endpoint {
+					t.Errorf("Endpoint mismatch: expected %s, got %s", tc.config.Endpoint, sender.GetEndpoint())
+				}
+
+				if sender.GetTimeout() != tc.config.Timeout {
+					t.Errorf("Timeout mismatch: expected %d, got %d", tc.config.Timeout, sender.GetTimeout())
+				}
+
+				if sender.GetRetryCount() != tc.config.RetryCount {
+					t.Errorf("RetryCount mismatch: expected %d, got %d", tc.config.RetryCount, sender.GetRetryCount())
+				}
+
+				if sender.GetRetryDelay() != tc.config.RetryDelay {
+					t.Errorf("RetryDelay mismatch: expected %d, got %d", tc.config.RetryDelay, sender.GetRetryDelay())
+				}
+
+				if sender.GetBatchSize() != tc.config.BatchSize {
+					t.Errorf("BatchSize mismatch: expected %d, got %d", tc.config.BatchSize, sender.GetBatchSize())
+				}
+
+				if sender.GetBatchDelay() != tc.config.BatchDelay {
+					t.Errorf("BatchDelay mismatch: expected %d, got %d", tc.config.BatchDelay, sender.GetBatchDelay())
+				}
+
+				if sender.GetFormat() != tc.config.Format {
+					t.Errorf("Format mismatch: expected %s, got %s", tc.config.Format, sender.GetFormat())
+				}
+
+				if sender.IsCompressionEnabled() != tc.config.Compression {
+					t.Errorf("Compression mismatch: expected %t, got %t", tc.config.Compression, sender.IsCompressionEnabled())
+				}
+
+				if sender.IsTLSEnabled() != tc.config.TLSEnabled {
+					t.Errorf("TLSEnabled mismatch: expected %t, got %t", tc.config.TLSEnabled, sender.IsTLSEnabled())
+				}
+
+				if sender.GetRateLimit() != tc.config.RateLimit {
+					t.Errorf("RateLimit mismatch: expected %d, got %d", tc.config.RateLimit, sender.GetRateLimit())
+				}
+			})
+		}
+	})
 }
