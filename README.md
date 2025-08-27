@@ -33,7 +33,7 @@ func main() {
     })
 
     // Create logger with zap adapter
-    logger := mystic.New(mystic.ZapAdapter, "my-service")
+    logger := mystic.New(mystic.ZapAdapter("my-service"))
     
     // Use the logger
     logger.Info("Server started", "port", 8080)
@@ -76,7 +76,7 @@ type GraylogSenderConfig struct {
 ### Basic Logging
 
 ```go
-logger := mystic.New(mystic.ZapAdapter, "my-service")
+logger := mystic.New(mystic.ZapAdapter("my-service"))
 
 logger.Debug("Debug message")
 logger.Info("Info message", "key", "value")
@@ -95,7 +95,7 @@ logger.ErrorDetail(err, "operation", "failed", "user_id", 123)
 ### Context and Chaining
 
 ```go
-logger := mystic.New(mystic.ZapAdapter, "my-service")
+logger := mystic.New(mystic.ZapAdapter("my-service"))
     .With("service", "api")
     .SkipLevel(1)
     .SetContext(ctx)
@@ -106,7 +106,7 @@ logger.Info("Request processed")
 ### With Fields
 
 ```go
-logger := mystic.New(mystic.ZapAdapter, "my-service")
+logger := mystic.New(mystic.ZapAdapter("my-service"))
     .With("user_id", 123, "session", "abc123")
 
 logger.Info("User action", "action", "login")
@@ -123,14 +123,14 @@ The zap adapter provides high-performance structured logging with OpenTelemetry 
 import "github.com/bi0dread/mystic"
 
 // Use default configuration (from environment variables)
-logger := mystic.New(mystic.ZapAdapter, "my-service")
+logger := mystic.New(mystic.ZapAdapter("my-service"))
 
 // Use custom Graylog configuration
 customConfig := mystic.GraylogSenderConfig{
     GrayLogAddr: "custom-graylog:12201",
     Facility:    "my-custom-facility",
 }
-logger := mystic.New(func(name string) mystic.Logger {
+logger := func(name string) mystic.Logger {
     return mystic.ZapAdapterWithConfig(name, customConfig)
 }, "my-service")
 ```
@@ -144,7 +144,7 @@ logger := mystic.New(func(name string) mystic.Logger {
 ```go
 import "github.com/bi0dread/mystic"
 
-logger := mystic.New(mystic.ZapAdapter, "my-service")
+logger := mystic.New(mystic.ZapAdapter("my-service"))
 ```
 
 **Dependencies:**
@@ -160,14 +160,14 @@ The zerolog adapter provides zero-allocation JSON logging with OpenTelemetry int
 import "github.com/bi0dread/mystic"
 
 // Use default configuration (from environment variables)
-logger := mystic.New(mystic.ZerologAdapter, "my-service")
+logger := mystic.New(mystic.ZerologAdapter("my-service"))
 
 // Use custom Graylog configuration
 customConfig := mystic.GraylogSenderConfig{
     GrayLogAddr: "custom-graylog:12201",
     Facility:    "my-custom-facility",
 }
-logger := mystic.New(func(name string) mystic.Logger {
+logger := func(name string) mystic.Logger {
     return mystic.ZerologAdapterWithConfig(name, customConfig)
 }, "my-service")
 ```
@@ -177,6 +177,277 @@ logger := mystic.New(func(name string) mystic.Logger {
 - `go.opentelemetry.io/otel/*`
 - `github.com/bi0dread/jeeko/morgana`
 - `github.com/Graylog2/go-gelf/gelf` (for Graylog transport)
+
+### File Adapter
+
+The file adapter provides file-based logging with rotation, compression, and multiple output formats.
+
+```go
+import "github.com/bi0dread/mystic"
+
+// Use default configuration
+logger := mystic.New(mystic.FileAdapter("my-service"))
+
+// Use custom configuration
+fileConfig := mystic.FileAdapterConfig{
+    Path:        "/var/log/myapp",
+    Filename:    "application",
+    MaxSize:     100 * 1024 * 1024, // 100MB
+    MaxAge:      30 * 24 * time.Hour, // 30 days
+    MaxBackups:  5,
+    Compress:    true,
+    Format:      "json", // "json", "console", "gelf"
+    Level:       "info",
+    Facility:    "myapp",
+}
+logger := func(name string) mystic.Logger {
+    return mystic.FileAdapterWithConfig(name, fileConfig)
+}, "my-service")
+```
+
+**Features:**
+- Automatic file rotation based on size and age
+- Compression of rotated files
+- Multiple output formats (JSON, Console, GELF)
+- Configurable log levels and facilities
+
+### HTTP Adapter
+
+The HTTP adapter sends logs to custom HTTP endpoints with batching, retries, and multiple formats.
+
+```go
+import "github.com/bi0dread/mystic"
+
+// Use default configuration
+logger := mystic.New(mystic.HTTPAdapter("my-service"))
+
+// Use custom configuration
+httpConfig := mystic.HTTPAdapterConfig{
+    Endpoint:    "https://api.logs.com/ingest",
+    Method:      "POST",
+    Headers:     map[string]string{"Authorization": "Bearer token"},
+    Timeout:     5 * time.Second,
+    RetryCount:  3,
+    RetryDelay:  1 * time.Second,
+    BatchSize:   100,
+    BatchDelay:  100 * time.Millisecond,
+    Format:      "json", // "json", "gelf"
+    Level:       "info",
+    Facility:    "myapp",
+}
+logger := func(name string) mystic.Logger {
+    return mystic.HTTPAdapterWithConfig(name, httpConfig)
+}, "my-service")
+```
+
+**Features:**
+- HTTP/HTTPS endpoint support
+- Automatic batching for performance
+- Configurable retry logic
+- Multiple output formats
+- Custom headers and authentication
+
+### Multi-Output Adapter
+
+The multi-output adapter sends logs to multiple destinations simultaneously with configurable strategies.
+
+```go
+import "github.com/bi0dread/mystic"
+
+// Create multi-output configuration
+multiConfig := mystic.MultiOutputConfig{
+    Adapters: []mystic.AdapterConfig{
+        {Name: "console", Adapter: mystic.ZapAdapter},
+        {Name: "file", Adapter: mystic.FileAdapter},
+        {Name: "graylog", Adapter: func(name string) mystic.Logger {
+            return mystic.ZapAdapterWithConfig(name, mystic.GraylogSenderConfig{
+                GrayLogAddr: "localhost:12201",
+                Facility:    "myapp",
+            })
+        }},
+    },
+    Strategy: "all", // "all", "first_success", "round_robin"
+}
+
+logger := func(name string) mystic.Logger {
+    return mystic.MultiOutputAdapterWithConfig(name, multiConfig)
+}, "my-service")
+```
+
+**Strategies:**
+- `all`: Send to all adapters
+- `first_success`: Send to adapters until one succeeds
+- `round_robin`: Distribute logs across adapters
+
+## Enhanced Logging Features
+
+Mystic provides advanced logging capabilities beyond basic logging:
+
+### Structured Logging
+
+```go
+logger := mystic.New(mystic.ZapAdapter("my-service"))
+enhanced := mystic.NewEnhancedLogger(logger, mystic.EnhancedLoggerConfig{
+    EnableMetrics: true,
+    EnableSampling: true,
+    EnableTiming: true,
+})
+
+// Structured event logging
+enhanced.Structured("user_login", map[string]interface{}{
+    "user_id": 123,
+    "ip_address": "192.168.1.1",
+    "user_agent": "Mozilla/5.0...",
+    "timestamp": time.Now(),
+})
+```
+
+### Log Sampling
+
+```go
+// Sample debug logs at 10% rate
+enhanced.Sampled("debug", 0.1, "high-volume-debug", "key", "value")
+
+// Sample info logs at 50% rate
+enhanced.Sampled("info", 0.5, "sampled-info", "metric", "value")
+```
+
+### Metrics Collection
+
+```go
+// Enable metrics collection
+enhanced.WithMetrics()
+
+// Record counters
+enhanced.IncrementCounter("requests_total", 1)
+enhanced.IncrementCounter("errors_total", 1)
+
+// Record gauges
+enhanced.RecordGauge("active_connections", 42.5)
+
+// Record histograms
+enhanced.RecordHistogram("request_duration_ms", 150.2)
+```
+
+### Performance Tracking
+
+```go
+// Enable timing
+enhanced.WithTiming("database_query")
+
+// Time an operation
+enhanced.TimeOperation("database_query", func() {
+    // Database query code here
+    time.Sleep(100 * time.Millisecond)
+})
+```
+
+### Rate Limiting
+
+```go
+// Limit to 100 logs per second
+enhanced.WithRateLimit(100)
+
+// Log messages (will be rate limited)
+for i := 0; i < 1000; i++ {
+    enhanced.Info("rate limited message", "count", i)
+}
+```
+
+### Conditional Logging
+
+```go
+// Log only in development
+enhanced.When(os.Getenv("ENV") == "development").Info("dev only message")
+
+// Log based on context
+enhanced.WhenContext(func(ctx context.Context) bool {
+    return ctx.Value("debug_mode") == true
+}).Debug("debug message")
+```
+
+### Batch Logging
+
+```go
+// Log multiple entries in batch
+entries := []mystic.LogEntry{
+    {Level: "info", Message: "batch entry 1", Fields: map[string]interface{}{"id": 1}},
+    {Level: "info", Message: "batch entry 2", Fields: map[string]interface{}{"id": 2}},
+    {Level: "error", Message: "batch entry 3", Fields: map[string]interface{}{"id": 3}},
+}
+
+enhanced.Batch(entries)
+```
+
+## Testing & Development
+
+Mystic provides comprehensive testing utilities and development tools:
+
+### Test Helpers
+
+```go
+import "github.com/bi0dread/mystic"
+
+// Capture logs during testing
+captured := mystic.CaptureLogs(func() {
+    logger := mystic.ZapAdapter("test-service")
+    logger.Info("test message")
+    logger.Error("test error")
+})
+
+// Assert log contents
+if !captured.Contains("test message") {
+    t.Error("expected log to contain 'test message'")
+}
+
+if !captured.ContainsLevel("error") {
+    t.Error("expected log to contain error level")
+}
+
+// Get specific entries
+infoEntries := captured.GetEntriesByLevel("info")
+errorEntries := captured.GetEntriesByMessage("test error")
+```
+
+### Mock Logger
+
+```go
+// Create mock logger with expectations
+mockLogger := mystic.NewMockLogger()
+mockLogger.ExpectInfo("expected message")
+mockLogger.ExpectError("expected error").ExpectCount(2)
+
+// Use in your code
+logger := mockLogger
+logger.Info("expected message")
+logger.Error("expected error")
+logger.Error("expected error")
+
+// Verify expectations
+if err := mockLogger.Verify(); err != nil {
+    t.Errorf("mock expectations not met: %v", err)
+}
+```
+
+### Test Logger
+
+```go
+// Create test logger that writes to buffer
+testLogger := mystic.NewTestLogger()
+
+// Log messages
+testLogger.Info("test message", "key", "value")
+testLogger.Error("test error")
+
+// Get output
+output := testLogger.GetOutput()
+if !strings.Contains(output, "test message") {
+    t.Error("expected output to contain 'test message'")
+}
+
+// Clear output
+testLogger.Clear()
+```
 
 ## Architecture
 
@@ -195,12 +466,74 @@ This allows you to:
 - Maintain backward compatibility with existing code
 - Test with custom configurations without affecting global state
 
+### Configuration Profiles
+
+Mystic supports environment-specific configuration profiles:
+
+```go
+import "github.com/bi0dread/mystic"
+
+// Load development profile
+devProfile, err := mystic.LoadProfile("development")
+if err != nil {
+    log.Fatal(err)
+}
+
+// Apply profile configuration
+mystic.SetConfig(devProfile.Config)
+
+// Load staging profile
+stagingProfile, err := mystic.LoadProfile("staging")
+if err != nil {
+    log.Fatal(err)
+}
+
+// Load production profile
+prodProfile, err := mystic.LoadProfile("production")
+if err != nil {
+    log.Fatal(err)
+}
+
+// Load testing profile
+testProfile, err := mystic.LoadProfile("testing")
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+**Available Profiles:**
+- **development**: Debug level, localhost Graylog, mystic-dev facility
+- **staging**: Info level, staging Graylog, mystic-staging facility  
+- **production**: Warn level, production Graylog, mystic-prod facility
+- **testing**: Debug level, no Graylog (fallback only), mystic-test facility
+
+### Environment Variable Loading
+
+```go
+// Load configuration from environment variables
+config, err := mystic.LoadConfigFromEnv()
+if err != nil {
+    log.Fatal(err)
+}
+
+// Validate configuration
+if err := config.Validate(); err != nil {
+    log.Fatal(err)
+}
+
+// Set defaults
+config.SetDefaults()
+
+// Apply configuration
+mystic.SetConfig(*config)
+```
+
 ```go
 // High-performance structured logging with OpenTelemetry + Graylog transport
-zapLogger := mystic.New(mystic.ZapAdapter, "zap-service")
+zapLogger := mystic.ZapAdapter("zap-service")
 
 // Zero-allocation JSON logging with OpenTelemetry + Graylog transport  
-zerologLogger := mystic.New(mystic.ZerologAdapter, "zerolog-service")
+zerologLogger := mystic.ZerologAdapter("zerolog-service")
 ```
 
 The GraylogSender automatically handles:
@@ -258,7 +591,7 @@ func MyCustomAdapter(named string) Logger {
 }
 
 // Usage
-logger := mystic.New(MyCustomAdapter, "my-service")
+logger := MyCustomAdapter("my-service")
 ```
 
 ## Graylog Integration

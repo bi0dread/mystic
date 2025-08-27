@@ -25,15 +25,75 @@ type Logger interface {
 	SetContext(ctx context.Context) Logger
 }
 
-// Adapter represents a constructor function that returns a concrete Logger.
-type Adapter func(named string) Logger
+// mysticLogger wraps an underlying Logger and implements the Logger interface
+type mysticLogger struct {
+	adapter Logger
+	name    string
+}
 
-// New constructs a Logger using the provided adapter constructor.
-func New(adapter Adapter, named string) Logger {
-	if adapter == nil {
+// New constructs a mystic Logger that wraps the provided logger instance.
+func New(logger Logger) Logger {
+	if logger == nil {
 		return nil
 	}
-	return adapter(named)
+	return &mysticLogger{
+		adapter: logger,
+		name:    "mystic",
+	}
+}
+
+// Debug delegates to the underlying adapter
+func (m *mysticLogger) Debug(msg string, keysAndValues ...interface{}) {
+	m.adapter.Debug(msg, keysAndValues...)
+}
+
+// Info delegates to the underlying adapter
+func (m *mysticLogger) Info(msg string, keysAndValues ...interface{}) {
+	m.adapter.Info(msg, keysAndValues...)
+}
+
+// Warn delegates to the underlying adapter
+func (m *mysticLogger) Warn(msg string, keysAndValues ...interface{}) {
+	m.adapter.Warn(msg, keysAndValues...)
+}
+
+// Error delegates to the underlying adapter
+func (m *mysticLogger) Error(msg string, keysAndValues ...interface{}) {
+	m.adapter.Error(msg, keysAndValues...)
+}
+
+// ErrorDetail delegates to the underlying adapter
+func (m *mysticLogger) ErrorDetail(err error, keysAndValues ...interface{}) {
+	m.adapter.ErrorDetail(err, keysAndValues...)
+}
+
+// Panic delegates to the underlying adapter
+func (m *mysticLogger) Panic(msg string, keysAndValues ...interface{}) {
+	m.adapter.Panic(msg, keysAndValues...)
+}
+
+// SkipLevel delegates to the underlying adapter
+func (m *mysticLogger) SkipLevel(skip int) Logger {
+	return &mysticLogger{
+		adapter: m.adapter.SkipLevel(skip),
+		name:    m.name,
+	}
+}
+
+// With delegates to the underlying adapter
+func (m *mysticLogger) With(args ...interface{}) Logger {
+	return &mysticLogger{
+		adapter: m.adapter.With(args...),
+		name:    m.name,
+	}
+}
+
+// SetContext delegates to the underlying adapter
+func (m *mysticLogger) SetContext(ctx context.Context) Logger {
+	return &mysticLogger{
+		adapter: m.adapter.SetContext(ctx),
+		name:    m.name,
+	}
 }
 
 func SetConfig(config Config) {
