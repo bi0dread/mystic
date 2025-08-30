@@ -1,2 +1,0 @@
-map[facility:test-facility level:%!s(int=1) short_message:{"level":"info","logger":"gelf-format","caller":"file_adapter.go:4","format":"gelf","time":"2025-08-27T18:29:13+03:30","message":"format test"}
- timestamp:%!s(int64=1756306753)]
