@@ -1,4 +1,4 @@
-module mystic
+module github.com/bi0dread/mystic
 
 go 1.23.2
 
