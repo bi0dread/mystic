@@ -69,7 +69,8 @@ func ZapAdapterWithConfig(named string, sender LogSender) Logger {
 	}
 	logger = zap.New(zapTee)
 
-	logger = logger.WithOptions(zap.AddCallerSkip(1))
+	logger = logger.WithOptions(zap.AddCallerSkip(2)) // Skip 2 frames to show test file instead of wrapper
+	logger = logger.WithOptions(zap.AddCaller())      // Add this to show caller information
 	logger = logger.Named(named)
 	sugar := logger.Sugar()
 
@@ -114,7 +115,7 @@ func (m *mysticZap) Debug(msg string, keysAndValues ...interface{}) {
 	if keysAndValues == nil {
 		keysAndValues = make([]interface{}, 0)
 	}
-	keysAndValues = append(keysAndValues, zap.String("caller", m.withStackTrace(3)))
+	// Let Zap handle caller information with AddCallerSkip
 	m.sugaredLogger.Debugw(msg, keysAndValues...)
 }
 
@@ -122,7 +123,7 @@ func (m *mysticZap) Info(msg string, keysAndValues ...interface{}) {
 	if keysAndValues == nil {
 		keysAndValues = make([]interface{}, 0)
 	}
-	keysAndValues = append(keysAndValues, zap.String("caller", m.withStackTrace(3)))
+	// Let Zap handle caller information with AddCallerSkip
 	m.sugaredLogger.Infow(msg, keysAndValues...)
 }
 
@@ -130,7 +131,7 @@ func (m *mysticZap) Warn(msg string, keysAndValues ...interface{}) {
 	if keysAndValues == nil {
 		keysAndValues = make([]interface{}, 0)
 	}
-	keysAndValues = append(keysAndValues, zap.String("caller", m.withStackTrace(3)))
+	// Let Zap handle caller information with AddCallerSkip
 	m.sugaredLogger.Warnw(msg, keysAndValues...)
 }
 
@@ -138,7 +139,7 @@ func (m *mysticZap) Error(msg string, keysAndValues ...interface{}) {
 	if keysAndValues == nil {
 		keysAndValues = make([]interface{}, 0)
 	}
-	keysAndValues = append(keysAndValues, zap.String("caller", m.withStackTrace(3)))
+	// Let Zap handle caller information with AddCallerSkip
 	m.sugaredLogger.Errorw(msg, keysAndValues...)
 }
 
@@ -146,7 +147,7 @@ func (m *mysticZap) ErrorDetail(err error, keysAndValues ...interface{}) {
 	if keysAndValues == nil {
 		keysAndValues = make([]interface{}, 0)
 	}
-	keysAndValues = append(keysAndValues, zap.String("caller", m.withStackTrace(3)))
+	// Let Zap handle caller information with AddCallerSkip
 
 	shortMsg := ""
 	fullMsg := ""
@@ -167,7 +168,7 @@ func (m *mysticZap) Panic(msg string, keysAndValues ...interface{}) {
 	if keysAndValues == nil {
 		keysAndValues = make([]interface{}, 0)
 	}
-	keysAndValues = append(keysAndValues, zap.String("caller", m.withStackTrace(3)))
+	// Let Zap handle caller information with AddCallerSkip
 	m.sugaredLogger.Panicw(msg, keysAndValues...)
 }
 

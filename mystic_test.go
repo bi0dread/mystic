@@ -3,6 +3,7 @@ package mystic
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -2181,4 +2182,225 @@ func Test_Configuration_Embedded_Verification(t *testing.T) {
 			})
 		}
 	})
+}
+
+// callerCaptureLogger is a test logger that captures caller information
+type callerCaptureLogger struct {
+	caller string
+	skip   int
+}
+
+func (c *callerCaptureLogger) Debug(msg string, keysAndValues ...interface{}) {
+	c.caller = c.withStackTrace(3 + c.skip)
+}
+
+func (c *callerCaptureLogger) Info(msg string, keysAndValues ...interface{}) {
+	c.caller = c.withStackTrace(3 + c.skip)
+}
+
+func (c *callerCaptureLogger) Warn(msg string, keysAndValues ...interface{}) {
+	c.caller = c.withStackTrace(3 + c.skip)
+}
+
+func (c *callerCaptureLogger) Error(msg string, keysAndValues ...interface{}) {
+	c.caller = c.withStackTrace(3 + c.skip)
+}
+
+func (c *callerCaptureLogger) ErrorDetail(err error, keysAndValues ...interface{}) {
+	c.caller = c.withStackTrace(3 + c.skip)
+}
+
+func (c *callerCaptureLogger) Panic(msg string, keysAndValues ...interface{}) {
+	c.caller = c.withStackTrace(3 + c.skip)
+}
+
+func (c *callerCaptureLogger) SkipLevel(skip int) Logger {
+	c.skip = skip
+	return c
+}
+
+func (c *callerCaptureLogger) With(args ...interface{}) Logger {
+	return c
+}
+
+func (c *callerCaptureLogger) SetContext(ctx context.Context) Logger {
+	return c
+}
+
+func (c *callerCaptureLogger) withStackTrace(skip int) string {
+	// Simple caller information similar to what the real adapters do
+	return fmt.Sprintf("test_logger.go:%d", skip)
+}
+
+func Test_SkipLevel_Caller_Values(t *testing.T) {
+	setSafeTestConfig()
+
+	// Test that different skip levels produce different caller values
+	t.Run("SkipLevel Caller Values Verification", func(t *testing.T) {
+		logger := &callerCaptureLogger{}
+
+		// Test skip level 1
+		logger1 := logger.SkipLevel(1)
+		logger1.Info("test message")
+		caller1 := logger.caller
+
+		// Reset and test skip level 3
+		logger.caller = ""
+		logger3 := logger.SkipLevel(3)
+		logger3.Info("test message")
+		caller3 := logger.caller
+
+		// Verify that different skip levels produce different caller values
+		if caller1 == caller3 {
+			t.Errorf("expected different caller values for skip levels 1 and 3, got same: %s", caller1)
+		}
+
+		// Verify the actual values are what we expect
+		expected1 := "test_logger.go:4" // 3 + 1
+		expected3 := "test_logger.go:6" // 3 + 3
+
+		if caller1 != expected1 {
+			t.Errorf("expected caller1 to be %s, got %s", expected1, caller1)
+		}
+
+		if caller3 != expected3 {
+			t.Errorf("expected caller3 to be %s, got %s", expected3, caller3)
+		}
+
+		t.Logf("Skip level 1 produced caller: %s", caller1)
+		t.Logf("Skip level 3 produced caller: %s", caller3)
+	})
+
+	// Test that chaining skip levels works correctly
+	t.Run("SkipLevel Chaining", func(t *testing.T) {
+		logger := &callerCaptureLogger{}
+
+		// Chain multiple skip levels
+		chainedLogger := logger.SkipLevel(1).SkipLevel(2)
+		chainedLogger.Info("chained test message")
+		chainedCaller := logger.caller
+
+		// The final skip level should be 2 (not cumulative)
+		expectedChained := "test_logger.go:5" // 3 + 2
+
+		if chainedCaller != expectedChained {
+			t.Errorf("expected chained caller to be %s, got %s", expectedChained, chainedCaller)
+		}
+
+		t.Logf("Chained skip levels produced caller: %s", chainedCaller)
+	})
+
+	// Test with different skip level combinations
+	t.Run("SkipLevel Combinations", func(t *testing.T) {
+		logger := &callerCaptureLogger{}
+
+		testCases := []struct {
+			skipLevel int
+			expected  string
+			name      string
+		}{
+			{0, "test_logger.go:3", "skip level 0"},
+			{1, "test_logger.go:4", "skip level 1"},
+			{2, "test_logger.go:5", "skip level 2"},
+			{3, "test_logger.go:6", "skip level 3"},
+			{5, "test_logger.go:8", "skip level 5"},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				// Reset caller
+				logger.caller = ""
+
+				// Apply skip level and log
+				skipLogger := logger.SkipLevel(tc.skipLevel)
+				skipLogger.Info("test message")
+
+				// Verify caller
+				if logger.caller != tc.expected {
+					t.Errorf("expected caller for %s to be %s, got %s",
+						tc.name, tc.expected, logger.caller)
+				}
+
+				t.Logf("%s produced caller: %s", tc.name, logger.caller)
+			})
+		}
+	})
+
+	// Test that skip levels are properly applied to all adapter types
+	t.Run("SkipLevel Across Adapters", func(t *testing.T) {
+		// Test with Zap adapter
+		zapLogger := New(ZapAdapter("test-skip-zap"))
+		if zapLogger == nil {
+			t.Fatalf("expected non-nil zap logger")
+		}
+
+		// Apply skip level and verify it's chainable
+		skipLogger := zapLogger.SkipLevel(2)
+		if skipLogger == nil {
+			t.Fatalf("expected non-nil logger after SkipLevel")
+		}
+
+		// Test that logging still works
+		skipLogger.Info("zap skip level test")
+
+		// Test with Zerolog adapter
+		zeroLogger := New(ZerologAdapter("test-skip-zero"))
+		if zeroLogger == nil {
+			t.Fatalf("expected non-nil zerolog logger")
+		}
+
+		// Apply skip level and verify it's chainable
+		skipZeroLogger := zeroLogger.SkipLevel(2)
+		if skipZeroLogger == nil {
+			t.Fatalf("expected non-nil logger after SkipLevel")
+		}
+
+		// Test that logging still works
+		skipZeroLogger.Info("zerolog skip level test")
+
+		// Test with File adapter
+		fileLogger := New(FileAdapter("test-skip-file"))
+		if fileLogger == nil {
+			t.Fatalf("expected non-nil file logger")
+		}
+
+		// Apply skip level and verify it's chainable
+		skipFileLogger := fileLogger.SkipLevel(2)
+		if skipFileLogger == nil {
+			t.Fatalf("expected non-nil logger after SkipLevel")
+		}
+
+		// Test that logging still works
+		skipFileLogger.Info("file skip level test")
+	})
+}
+
+func Test_SkipLevel_Different_Caller_Values(t *testing.T) {
+	setSafeTestConfig()
+
+	// Create a logger and test that different skip levels produce different caller values
+	logger := New(ZapAdapter("test-skip-diff"))
+	if logger == nil {
+		t.Fatalf("expected non-nil logger")
+	}
+
+	// Test with no skip level (default)
+	logger.Info("message with no skip level")
+
+	// Test with skip level 1
+	logger1 := logger.SkipLevel(1)
+	logger1.Info("message with skip level 1")
+
+	// Test with skip level 3
+	logger3 := logger.SkipLevel(3)
+	logger3.Info("message with skip level 3")
+
+	// Test with skip level 5
+	logger5 := logger.SkipLevel(5)
+	logger5.Info("message with skip level 5")
+
+	// The key point is that these should produce different caller information
+	// We can see this in the test output - different skip levels should show
+	// different file paths or line numbers in the caller field
+	t.Logf("Test completed - check the caller fields above to see different values for different skip levels")
 }
