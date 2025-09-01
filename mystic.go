@@ -2,6 +2,9 @@ package mystic
 
 import (
 	"context"
+	"reflect"
+	"runtime"
+	"strings"
 )
 
 var LOG_LEVEL = int8(-1)
@@ -99,4 +102,27 @@ func (m *mysticLogger) SetContext(ctx context.Context) Logger {
 func SetConfig(config Config) {
 	FACILITY = config.Facility
 	setLogLevel(config.LogLevel)
+}
+
+func ExtractFunctionName(input string) string {
+	parts := strings.Split(input, ".")
+	return parts[len(parts)-1]
+}
+
+func GtStructName(i any) string {
+	t := reflect.TypeOf(i)
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	return t.Name()
+}
+
+func Caller(skip int) runtime.Frame {
+	pc := make([]uintptr, 15)
+	n := runtime.Callers(skip, pc)
+	frames := runtime.CallersFrames(pc[:n])
+	frame, _ := frames.Next()
+
+	return frame
+
 }
