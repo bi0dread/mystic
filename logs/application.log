@@ -387,3 +387,8 @@
 {"level":"info","logger":"test-skip-file","caller":"file_adapter.go:5","time":"2025-09-01T17:21:49+03:30","message":"file skip level test"}
 {"level":"info","logger":"test-skip-file","caller":"file_adapter.go:5","time":"2025-09-01T17:23:53+03:30","message":"file skip level test"}
 {"level":"info","logger":"test-skip-file","caller":"file_adapter.go:5","time":"2025-09-01T17:32:27+03:30","message":"file skip level test"}
+{"level":"info","logger":"test-file","caller":"file_adapter.go:4","key":"value","time":"2025-09-01T18:09:01+03:30","message":"file test message"}
+{"level":"error","logger":"test-file","caller":"file_adapter.go:4","error_key":"error_value","time":"2025-09-01T18:09:01+03:30","message":"file test error"}
+{"level":"warn","logger":"test-file","caller":"file_adapter.go:4","time":"2025-09-01T18:09:01+03:30","message":"file warning message"}
+{"level":"info","logger":"test-file","caller":"file_adapter.go:4","persistent":"field","time":"2025-09-01T18:09:01+03:30","message":"chained message"}
+{"level":"info","logger":"test-skip-file","caller":"file_adapter.go:5","time":"2025-09-01T18:11:15+03:30","message":"file skip level test"}

@@ -278,7 +278,7 @@ func (m *mysticFile) Panic(msg string, keysAndValues ...interface{}) {
 }
 
 func (m *mysticFile) logWithLevel(level zerolog.Level, msg string, keysAndValues ...interface{}) {
-	// Add caller
+	// Add caller - start with base skip 3 to show test file instead of wrapper
 	caller := m.withStackTrace(3 + m.skip)
 	kv := convertKeyValues(keysAndValues)
 	kv["caller"] = caller
