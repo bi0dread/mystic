@@ -55,9 +55,17 @@ type HTTPGormLogger struct {
 func NewZapGormLoggerAdapter(logger Logger) GormLogger {
 	// Extract zap.Logger from the mystic logger
 	zapLogger := zap.NewNop() // Default fallback
+
+	// Handle both direct mysticZap and wrapped mysticLogger
 	if zapAdapter, ok := logger.(*mysticZap); ok {
 		zapLogger = zapAdapter.logger
+	} else if mysticLogger, ok := logger.(*mysticLogger); ok {
+		// Extract the underlying adapter from the wrapped logger
+		if zapAdapter, ok := mysticLogger.adapter.(*mysticZap); ok {
+			zapLogger = zapAdapter.logger
+		}
 	}
+
 	return GormLogger{
 		ZapLogger:                 zapLogger,
 		SlowThreshold:             100 * time.Millisecond,
@@ -71,9 +79,17 @@ func NewZapGormLoggerAdapter(logger Logger) GormLogger {
 func NewZerologGormLoggerAdapter(logger Logger) ZerologGormLogger {
 	// Extract zerolog.Logger from the mystic logger
 	zeroLogger := zerolog.New(nil) // Default fallback
+
+	// Handle both direct mysticZero and wrapped mysticLogger
 	if zeroAdapter, ok := logger.(*mysticZero); ok {
 		zeroLogger = zeroAdapter.logger
+	} else if mysticLogger, ok := logger.(*mysticLogger); ok {
+		// Extract the underlying adapter from the wrapped logger
+		if zeroAdapter, ok := mysticLogger.adapter.(*mysticZero); ok {
+			zeroLogger = zeroAdapter.logger
+		}
 	}
+
 	return ZerologGormLogger{
 		Logger:                    zeroLogger,
 		SlowThreshold:             100 * time.Millisecond,
@@ -390,7 +406,23 @@ func NewGormLoggerFromHTTP(logger Logger) HTTPGormLogger {
 // NewGormLoggerFromMystic creates a GormLogger adapter from any mystic logger
 // It automatically detects the type and creates the appropriate GormLogger
 func NewGormLoggerFromMystic(logger Logger) gormlogger.Interface {
-	// This is a generic function that could be used to create any type of GormLogger
-	// For now, we'll return a FileGormLogger as a default since it uses the generic Logger interface
-	return NewFileGormLoggerAdapter(logger)
+	// Handle both direct adapters and wrapped mysticLogger
+	var actualLogger Logger = logger
+
+	// If it's a wrapped mysticLogger, extract the underlying adapter
+	if mysticLogger, ok := logger.(*mysticLogger); ok {
+		actualLogger = mysticLogger.adapter
+	}
+
+	// Detect the adapter type and create the appropriate GORM logger
+	switch actualLogger.(type) {
+	case *mysticZap:
+		return NewZapGormLoggerAdapter(logger)
+	case *mysticZero:
+		return NewZerologGormLoggerAdapter(logger)
+	default:
+		// For File, HTTP, MultiOutput, Enhanced, and other adapters, use FileGormLogger
+		// since they all implement the generic Logger interface
+		return NewFileGormLoggerAdapter(logger)
+	}
 }
