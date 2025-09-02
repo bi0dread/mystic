@@ -392,3 +392,28 @@
 {"level":"warn","logger":"test-file","caller":"file_adapter.go:4","time":"2025-09-01T18:09:01+03:30","message":"file warning message"}
 {"level":"info","logger":"test-file","caller":"file_adapter.go:4","persistent":"field","time":"2025-09-01T18:09:01+03:30","message":"chained message"}
 {"level":"info","logger":"test-skip-file","caller":"file_adapter.go:5","time":"2025-09-01T18:11:15+03:30","message":"file skip level test"}
+{"level":"warn","logger":"test-gorm-file","caller":"file_adapter.go:4","time":"2025-09-01T20:35:16+03:30","message":"test warn message"}
+{"level":"error","logger":"test-gorm-file","caller":"file_adapter.go:4","time":"2025-09-01T20:35:16+03:30","message":"test error message"}
+{"level":"warn","logger":"test-gorm-file","caller":"file_adapter.go:4","time":"2025-09-01T20:38:28+03:30","message":"test warn message"}
+{"level":"error","logger":"test-gorm-file","caller":"file_adapter.go:4","time":"2025-09-01T20:38:28+03:30","message":"test error message"}
+{"level":"warn","logger":"test-gorm-file","caller":"file_adapter.go:4","time":"2025-09-01T20:39:03+03:30","message":"test warn message"}
+{"level":"error","logger":"test-gorm-file","caller":"file_adapter.go:4","time":"2025-09-01T20:39:03+03:30","message":"test error message"}
+{"level":"info","logger":"test-file","caller":"file_adapter.go:4","key":"value","time":"2025-09-01T20:39:03+03:30","message":"file test message"}
+{"level":"error","logger":"test-file","caller":"file_adapter.go:4","error_key":"error_value","time":"2025-09-01T20:39:03+03:30","message":"file test error"}
+{"level":"warn","logger":"test-file","caller":"file_adapter.go:4","time":"2025-09-01T20:39:03+03:30","message":"file warning message"}
+{"level":"info","logger":"test-file","caller":"file_adapter.go:4","persistent":"field","time":"2025-09-01T20:39:03+03:30","message":"chained message"}
+{"level":"info","logger":"test-multi","caller":"file_adapter.go:4","key":"value","time":"2025-09-01T20:39:03+03:30","message":"multi test message"}
+{"level":"error","logger":"test-multi","caller":"file_adapter.go:4","error_key":"error_value","time":"2025-09-01T20:39:03+03:30","message":"multi test error"}
+{"level":"warn","logger":"test-multi","caller":"file_adapter.go:4","time":"2025-09-01T20:39:03+03:30","message":"multi warning message"}
+{"level":"info","logger":"test-multi","caller":"file_adapter.go:4","persistent":"field","time":"2025-09-01T20:39:03+03:30","message":"chained message"}
+{"level":"info","logger":"all-strategy","caller":"file_adapter.go:4","strategy":"all","time":"2025-09-01T20:39:03+03:30","message":"strategy test"}
+{"level":"info","logger":"round-robin-strategy","caller":"file_adapter.go:4","strategy":"round_robin","time":"2025-09-01T20:39:03+03:30","message":"strategy test"}
+{"level":"info","logger":"test-skip-file","caller":"file_adapter.go:5","time":"2025-09-01T20:39:06+03:30","message":"file skip level test"}
+{"level":"warn","logger":"test-gorm-file","caller":"file_adapter.go:4","time":"2025-09-01T20:42:50+03:30","message":"test warn message"}
+{"level":"error","logger":"test-gorm-file","caller":"file_adapter.go:4","time":"2025-09-01T20:42:50+03:30","message":"test error message"}
+{"level":"warn","logger":"test-gorm-file","caller":"file_adapter.go:4","time":"2025-09-01T20:43:12+03:30","message":"test warn message"}
+{"level":"error","logger":"test-gorm-file","caller":"file_adapter.go:4","time":"2025-09-01T20:43:12+03:30","message":"test error message"}
+{"level":"warn","logger":"test-gorm-file","caller":"file_adapter.go:4","time":"2025-09-01T21:53:59+03:30","message":"test warn message"}
+{"level":"error","logger":"test-gorm-file","caller":"file_adapter.go:4","time":"2025-09-01T21:53:59+03:30","message":"test error message"}
+{"level":"warn","logger":"test-gorm-file","caller":"file_adapter.go:4","time":"2025-09-01T21:54:07+03:30","message":"test warn message"}
+{"level":"error","logger":"test-gorm-file","caller":"file_adapter.go:4","time":"2025-09-01T21:54:07+03:30","message":"test error message"}
